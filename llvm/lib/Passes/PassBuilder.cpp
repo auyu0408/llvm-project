@@ -329,6 +329,7 @@
 #include "llvm/Transforms/Utils/UnifyLoopExits.h"
 
 #include "llvm/Transforms/Utils/Hello.h"
+#include "llvm/Transforms/Utils/NewMod.h"
 
 #include "llvm/Transforms/Vectorize/LoadStoreVectorizer.h"
 #include "llvm/Transforms/Vectorize/LoopIdiomVectorize.h"

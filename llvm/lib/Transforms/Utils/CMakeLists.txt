@@ -33,6 +33,7 @@ add_llvm_component_library(LLVMTransformUtils
   GuardUtils.cpp
 
   Hello.cpp
+  NewMod.cpp
 
   HelloWorld.cpp
   InlineFunction.cpp
