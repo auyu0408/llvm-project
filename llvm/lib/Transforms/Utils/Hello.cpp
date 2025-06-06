@@ -4,12 +4,16 @@
 #include "llvm/ADT/BreadthFirstIterator.h" // 使用內建BFS來協助 fordFulkerson
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/SCCIterator.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h" // EntryBlock.front
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Use.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/raw_ostream.h" // errs()
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -156,13 +160,11 @@ int fordFulkerson(InstGraph& G, Value* source, Value* target,
         //use BFS to find path p
         while(!q.empty()){
             NodeNo u = q.front();
-            //errs() << "In node " << To_Value[u] << "\n";
             q.pop();
 
             for(auto v:G.adjList[u]){
                 if(parent.find(v) == parent.end() && G.capacity[{u, v}] > G.flow[{u, v}]){
                     parent[v] = u; //parent[child] = parent;
-                    //errs() << "parent[" << To_Value[v] << "] = " << To_Value[u] << "\n";
                     if(v == To_Node[target]) break;//已經到target了
                     q.push(v);
                 }
@@ -213,7 +215,7 @@ int fordFulkerson(InstGraph& G, Value* source, Value* target,
 }
 
 void findMinCut(InstGraph& G, const std::unordered_set<NodeNo> &reachableFromSource, std::vector<Instruction *> &sepInsts){
-    errs() << "Minimum Cut edges:" << "\n";
+    //errs() << "Minimum Cut edges:" << "\n";
 
     for(auto& [u,neighbors]:G.adjList){
         if(reachableFromSource.count(u)){
@@ -221,9 +223,13 @@ void findMinCut(InstGraph& G, const std::unordered_set<NodeNo> &reachableFromSou
                 if(!reachableFromSource.count(v) && G.capacity[{u, v}] > 0){
                     Value *u_v = To_Value[u].back();
                     Value *v_v = To_Value[v][0];
-                    errs() << *u_v << "->" << *v_v << "\n";
-                    if(Instruction *I = dyn_cast<Instruction>(v_v)){
-                        sepInsts.push_back(I);
+                    if(Instruction *u_I = dyn_cast<Instruction>(u_v)){
+                        sepInsts.push_back(u_I);
+                        errs() << *u_I << "\n";
+                    }
+                    if(Instruction *v_I = dyn_cast<Instruction>(v_v)){
+                        sepInsts.push_back(v_I);
+                        errs() << "->" << *v_I << "\n";
                     }
                 }
             }
@@ -276,10 +282,14 @@ void addDependency(Value* src, Value* dest, std::unordered_map<Value *, std::vec
     
     std::queue<std::vector<Value *>> q;
     q.push({src});
+    int dep = 0;
 
     while(!q.empty()){
         std::vector<Value *> path = q.front();
         q.pop();
+        if(dep > 200) {
+            break;
+        }
 
         Value* last = path.back();
         if(last == dest){
@@ -298,7 +308,10 @@ void addDependency(Value* src, Value* dest, std::unordered_map<Value *, std::vec
                 q.push(newPath);
             }
         }
+        dep++;
     }
+
+    return;
 }
 
 std::unordered_map<std::pair<Value *, Value *>, int, PairHash> buildCapacity(Function &F, std::unordered_map<Value *, std::vector<Value *>>& G){
@@ -310,7 +323,9 @@ std::unordered_map<std::pair<Value *, Value *>, int, PairHash> buildCapacity(Fun
     for(BasicBlock &BB : F){
         for(Instruction &Inst : BB){
             Value *src = &Inst;
+            //errs() << "src: " << *src << "\n";
             for (auto dest : src->users()) {
+                //errs() << "dest: " << *dest << "\n";
                 //避免store探索到相同指令
                 if(rec.count({src, dest}))
                     continue;
@@ -321,6 +336,7 @@ std::unordered_map<std::pair<Value *, Value *>, int, PairHash> buildCapacity(Fun
             }  
         }
     }
+    //errs() << "finished param capacity\n";
 
     //argument dependency
     for(auto &arg:F.args()){
@@ -334,6 +350,7 @@ std::unordered_map<std::pair<Value *, Value *>, int, PairHash> buildCapacity(Fun
             } 
         }
     }
+    //errs() << "finished argument capacity\n";
 
     return Cap;
 }
@@ -416,152 +433,185 @@ void mappingNode(std::vector<std::vector<Value *>> &SCCs, std::vector<std::vecto
 }
 
 void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM){
-    Instruction *cutI = sepInsts[0];
-    BasicBlock *cutIBB = cutI->getParent();
+    
     DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F); // 分析使用位置的 DominatorTree 
-    // build new basic block
-    BasicBlock *newCutBB = SplitBlock(cutIBB, cutI); // SplitBlock() [4/4]
-
-    // 分析切割後程式 Live Range
-    // 找到所有 cutI 前的 Instruction
-    std::vector<BasicBlock *> blocksToMove;
-    std::queue<BasicBlock *> worklist;
-    SmallPtrSet<BasicBlock *, 8> visited;
-    worklist.push(newCutBB);
-    visited.insert(newCutBB);
-
-    while(!worklist.empty()){
-        BasicBlock *cur = worklist.front();
-        worklist.pop();
-        blocksToMove.push_back(cur);
-
-        for(auto *succ:successors(cur)){
-            if(visited.insert(succ).second){
-                worklist.push(succ);
-            }
-        }
+     
+    // 1. get Function info
+    if(sepInsts[0]->isTerminator()){
+        errs() << "Cut Instruction is Terminator\n";
+        return;
+    }
+    if(isa<ReturnInst>(sepInsts[0])||(sepInsts.size() > 1 && isa<ReturnInst>(sepInsts[1]))){
+        errs() << "We don't need to split return instruction\n";
+        return;
     }
 
-    std::set<Value *> defBeforeCut;
-    for(auto &BB:F){
-        for(auto &I:BB){
-            if(&I == cutI){
-                break;
-            }
-            defBeforeCut.insert(&I);
-        }
+    Module *M = F.getParent();
+    Instruction *cutI;
+    if(find(sepInsts.begin(), sepInsts.end(), sepInsts[1]) == sepInsts.end()){
+        //errs() << "No enpugh Instructions to split\n";
+        return;
     }
-    
-
-    // 對每個 defBeforeCut 的指令列出使用者
-    std::set<Value *> LiveOut;
-    for(Value *V:defBeforeCut){
-        for(Use &U:V->uses()){
-            if(Instruction *useInst = dyn_cast<Instruction>(U.getUser())){
-                if(DT.dominates(cutI, useInst)){ //透過 cutI 是否支配 useInst，可以知道 useInst 是否一定在 cutI 之後執行
-                    unsigned opIdx = U.getOperandNo();
-                    Value *operand = U.getUser()->getOperand(opIdx);   
-                    
-                    LiveOut.insert(operand);
-                }
-            }
-        }
-    }
-
+    else cutI = sepInsts[1];
     /***
-    errs() << "Live-Out values:\n";
-    for (Value *V : LiveOut) {
-        llvm::errs() << *V << "\n";
-    }
-        ***/
-    
-    // 建立新 function，先 clone 整個 function 
-    Function *newFunc = Function::Create(F.getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage, 
-                                F.getName() + "_split", F.getParent());
-    assert(newFunc && "newFunc is null!");
-
-    ValueToValueMapTy VMap;
-    Function::arg_iterator argIter = newFunc->arg_begin();
-    for(auto &arg:F.args()){
-        VMap[&arg] = &*argIter++;
-    }
-    
-    for(auto *BB:blocksToMove){
-        BasicBlock *clonedBB = BasicBlock::Create(BB->getContent(), "", newFunc);
-        VMap[BB] = clonedBB;
-    }
-
-    for(auto &BB:blocksToMove){
-        BasicBlock *clonedBB = cast<BasicBlock>(VMap[BB]);
-
-        for(auto &I:BB){
-            Instruction *newInst = I.clone();
-            
-            for(unsigned i=0; i<newInst->getNumOperands(); i++){
-                Value *op = I->getOperand(i);
-                auto it = VMap.find(op);
-                if(it != VMap.end()){
-                    newInst->setOperand(i, it->second);
-                }
-            }
-            VMap[&I] = cnewInst;
-            clonedBB->getInstList().push_back(newInst);
-        }
-    }
-
-    Builder.SetInsertPoint(cutI);
-    // 根據 newFunc 的參數，傳入原來的值
-    Builder.CreateCall(newFunc, args);
-
-    /***
-    for(auto &BB:*newFunc){
-        for(auto &I:BB){
-            if(Instruction *Inst = dyn_cast<Instruction>(&I)){
-                errs() << "Inst: " << *Inst << "\n";
-            }
-        }
-    }
-
-    /***
-    // 刪除不需要的 BB
-    Instuction *oldCut = cutI;
-    Instruction *newCut = cast<Instruction>(VMap[cutI]);
-    BasicBlock *newCutBB = newCut->getParent();
-
-    std::set<BasicBlock *> KeepBB;
-    std::vector<BasicBlock *> worklist = { newBB };
-    for(!worklist.empty()){
-        BasicBlock *cur = worklist.back();
-        worklist.pop_back();
-
-        if(!keepBB.insert(cur).second) 
-            continue;
-
-        for(succ_iterator SI = succ_begin(cur), SE = succ_end(cur); SI != SE; ++SI){
-            worklist.push_back(*SI);
-        }
-    }
-
-    std::vector<BasicBlock *> toDelete;
-    for(auto &BB:*newFunc){
-        if(KeepBB.find(&BB) == KeepBB.end()){
-            toDelete.push_back(&BB);
-        }
-    }
-
-    /***
-    for(auto &BB:toDelete){
-        while(!BB->empty()){
-            BB->back().eraseFromParent();
-        }
-        BB->eraseFromParent();
+    errs() << cutI->getParent()->front() << "\n";
+    if(cutI == &(cutI->getParent()->front())){
+        errs() << "Cut Instruction is not the first instruction in BasicBlock\n";
+        return;
     }
     ***/
+    BasicBlock *cutBB = cutI->getParent();
+    BasicBlock *newCutBB = cutBB->splitBasicBlock(cutI, cutBB->getName() + ".split"); // build new BB
+    Instruction *splitP = cutBB->getTerminator(); // 抓住cutI前一個指令作為 split 點，負責 call function 和 安插新 return
+
+    // 2. 蒐集要移出去的 BB
+    std::vector<BasicBlock *> BlocksToMove;
+    BlocksToMove.push_back(newCutBB);
+    for(auto &BB : F){
+        if(&BB != newCutBB && &BB != cutBB && DT.dominates(cutBB, &BB)){
+            BlocksToMove.push_back(&BB);
+        }
+    }   
+
+    // 3. 分析 LiveOuts
+    // 找到所有 cutI 前的 Instruction，分析切割後程式 Live Range
+    /***
+    我只想看在BlocksToMove中，且被BlocksToMove後面用到的指令
+    但比如說包含了%12 = phi i32 [ %4, %2 ], [ %10, %9 ]的話，我應該只有要 %12而不需要%4 %2 %10 %9
+    ***/
+    std::set<Value *> LiveOuts;
+    for(auto &BB:F){
+        if(std::find(BlocksToMove.begin(), BlocksToMove.end(), &BB) == BlocksToMove.end()){
+            for(auto &I:BB){
+                for(Use &U:I.uses()){
+                    if(Instruction *useInst = dyn_cast<Instruction>(U.getUser())){
+                        BasicBlock *useB = useInst->getParent();
+                        if(std::find(BlocksToMove.begin(), BlocksToMove.end(), useB) != BlocksToMove.end()){
+                            unsigned opIdx = U.getOperandNo();
+                            Value *operand = U.getUser()->getOperand(opIdx);   
+                            
+                            LiveOuts.insert(operand);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for(auto &arg:F.args()){
+        for(Use &U:arg.uses()){
+            if(Instruction *useInst = dyn_cast<Instruction>(U.getUser())){
+                BasicBlock *useB = useInst->getParent();
+                if(std::find(BlocksToMove.begin(), BlocksToMove.end(), useB) != BlocksToMove.end()){
+                    LiveOuts.insert(&arg);
+                }
+            }
+        }
+    }
+
+    if(LiveOuts.empty()){
+        errs() << "No LiveOuts found, nothing to split.\n";
+        //errs() << "Name: " << F.getName() << "\n";
+        //for(auto Inst:sepInsts){
+        //    if(Instruction *I = dyn_cast<Instruction>(Inst)){
+        //        errs() << "Instruction: " << *I << "\n";
+        //    }
+        //}
+        return;
+    }
+
+    // 4. 建立 function 
+    // 4-1 取得 LiveOuts variable 型態，這會是新 function 的 argument type
+    FunctionType *FTy = F.getFunctionType();
+    std::vector<Type *> argTypes;
+    for(Value *LiveOut : LiveOuts){
+        Type *argType = LiveOut->getType();
+        argTypes.push_back(argType);
+    }
+
+    // 4-2. 取得return type，並與 argument type 建立 function type
+    FunctionType *newFTy = FunctionType::get(FTy->getReturnType(), argTypes, false);
+    //4-3. 建立新的 function
+    std::string newFuncName = F.getName().str() + "_cloned";
+    Function *newFunc = Function::Create(newFTy, F.getLinkage(), newFuncName, M);
+
+    // 5. 建立對應參數(ValueMap)
+    ValueToValueMapTy VMap;
+    unsigned argCount = 0;
+    auto argIt = newFunc->arg_begin();
+    for(Value *V : LiveOuts){
+        Value *arg = &*argIt++;
+        //errs() << V->getName()  << "\n";
+        arg->setName("arg" + std::to_string(argCount++) + ".moved"); // 
+        //errs() << "New Argument: " << arg->getName() << "\n";
+        VMap[V] = arg;
+    }
+
+    // 6. 替換新function 的變數
+    // 不能直接用 replaceAllUsesWith()，會有風險（可能一部分被 split point 的 front 用，一部分被 back 用）
+    for(auto &BB : BlocksToMove){
+        for(auto &I : *BB){
+            //errs() << "I: " << I << "\n";
+            for(unsigned i = 0; i < I.getNumOperands(); i++){
+                Value *Op = I.getOperand(i);
+                if(VMap.count(Op)){
+                    I.setOperand(i, VMap[Op]);
+                }
+            }
+        }
+    }
+    
+    // 7. 建立新函數的 entry
+    BasicBlock *Entry = BasicBlock::Create(M->getContext(), "entry", newFunc);
+    IRBuilder<> Builder(Entry);
+    Builder.CreateBr(newCutBB);
+
+    // 8. 移動 basic block
+    for(auto &BB : BlocksToMove){
+        BB->removeFromParent();
+        BB->insertInto(newFunc);
+    }
+
+    /***
+    errs() << "New Function: " << newFunc->getName() << "\n";
+    for(auto &BB:*newFunc){
+        errs() << BB << "\n";
+    }
+    ***/
+
+    // 9. 將原函數插入 Call, return
+    IRBuilder<> FBuilder(splitP);
+    std::vector<Value *> args;
+    for(Value *LiveOut : LiveOuts){
+        args.push_back(LiveOut);
+    }
+    Value *CallResult = FBuilder.CreateCall(newFunc, args);
+    if(FTy->getReturnType()->isVoidTy()){
+        FBuilder.CreateRetVoid();
+    }
+    else{
+        FBuilder.CreateRet(CallResult);
+    }  
+    splitP->eraseFromParent(); // 刪除原本的指令
+
+
+    //errs() << "Verify\n";
+    bool broken = verifyFunction(*newFunc, &errs());
+    if(broken){
+        errs() << "Function Verified failed.\n";
+        return;
+    }
 
     return;
 }
 
 PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
+    if(F.hasFnAttribute("noinline")) return PreservedAnalyses::all();
+    //if(F.getName() != "_ZSt4copyIPfPdET0_T_S3_S2_") return PreservedAnalyses::all();
+    // 檢查是不是要分開的function
+    if(F.getName().ends_with("cloned")) return PreservedAnalyses::all();
+    //errs() << F.getName() << "\n";
+
     // 先建立以instruction為主的cfg，建立FlowGraph並找到SCC（loop）
     std::unordered_map<Value *, std::vector<Value *>> CFG = buildGraph(F);
     FlowGraph FG(CFG);
@@ -598,20 +648,14 @@ PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
         }
     }
 
+    //errs() << "finished classfied SCC and alone.\n";
     mappingNode(SCCs, alone);
-    // mapping後顯示每個node的長相（SCC已經印在同個node）
-    /***
-    for(auto ele:IG.adjList){
-        NodeNo u = ele.first;
-        errs() << "Node #" << u << ": " << "\n";
-        for(auto v:To_Value[u]){
-            errs() << "\t" << *v << "\n";
-        }
-    }
-    ***/
+
     std::unordered_map<std::pair<Value *, Value *>, int, PairHash> cap = buildCapacity(F, CFG);
+    //errs() << "finished build capacity.\n";
     // 建立可切割Graph
     InstGraph IG(To_Node, CFG, cap);
+    //errs() << "finished build InstGraph.\n";
     //exportCFG(IG, F.getName()); // 印出Graph來看
     
     // Minimum Cut
@@ -620,26 +664,25 @@ PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
 
     PostDominatorTree &PDT = AM.getResult<PostDominatorTreeAnalysis>(F);
     Instruction *target = getLatestReturn(F, PDT);
-    //errs() << "target: " << *target << "\n";
 
     int maxFlow = fordFulkerson(IG, source, target, rfs);
-    errs() << "MaximumFlow: " << maxFlow << "\n";
+    //errs() << F.getName() << ", MaximumFlow: " << maxFlow << "\n";
     if(maxFlow != 0){
         std::vector<Instruction *> sepInsts;
         findMinCut(IG, rfs, sepInsts);
 
-        errs() << "create new basic block\n";
+        //errs() << "create new basic block\n";
         splitFunc(sepInsts, F, AM);
+        //errs() << "Inline function\n";
+        for(auto *U:F.users()){
+            if(auto *call = dyn_cast<CallInst>(U)){
+                if(call->getCalledFunction() == &F){
+                    InlineFunctionInfo IFI;
+                    InlineFunction(*call, IFI);
+                }
+            }
+        }
     }
 
-    // 印出現在的 IR 來看
-    /***
-    for(auto &BB:F){
-        for(auto &I:BB){
-            errs() << I << "\n";
-        }
-        errs() << BB << "\n";
-    }
-    ***/
-    return PreservedAnalyses::all();
+    return PreservedAnalyses::none();
 }
