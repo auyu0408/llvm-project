@@ -144,6 +144,8 @@
 #include "llvm/Transforms/Vectorize/SLPVectorizer.h"
 #include "llvm/Transforms/Vectorize/VectorCombine.h"
 
+#include "llvm/Transforms/Utils/Hello.h"
+
 using namespace llvm;
 
 static cl::opt<InliningAdvisorMode> UseInlineAdvisor(
@@ -301,6 +303,8 @@ static cl::opt<std::string> InstrumentColdFuncOnlyPath(
     cl::desc("File path for cold function only instrumentation(requires use "
              "with --pgo-instrument-cold-function-only)"),
     cl::Hidden);
+
+extern cl::opt<bool> EnableHello;
 
 extern cl::opt<std::string> UseCtxProfile;
 extern cl::opt<bool> PGOInstrumentColdFunctionOnly;
@@ -1253,8 +1257,6 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
 
   // Remove any dead arguments exposed by cleanups, constant folding globals,
   // and argument promotion.
-  MPM.addPass(DeadArgumentEliminationPass());
-
   if (Phase != ThinOrFullLTOPhase::ThinLTOPreLink)
     MPM.addPass(CoroCleanupPass());
 
@@ -1708,6 +1710,8 @@ PassBuilder::buildThinLTOPreLinkDefaultPipeline(OptimizationLevel Level) {
   // phase that will run after the thin link, running this here ends up with
   // less information than will be available later and it may grow functions in
   // ways that aren't beneficial.
+  if ()
+
   if (RunPartialInlining)
     MPM.addPass(PartialInlinerPass());
 
