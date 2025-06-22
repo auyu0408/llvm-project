@@ -5,25 +5,19 @@
 using namespace llvm;
 
 PreservedAnalyses NewModPass::run(Module &M, ModuleAnalysisManager &AM){
-    
-    //errs() << "enter NewPass\n";
 
     std::vector<Function *> toDelete;
     for(auto &F:M){
-        if(F.isDeclaration()){
-            assert(!F.isDeclaration() && "Function is a declaration, no attributes!");
-            continue;
-        }
+        if(F.isDeclaration()) continue;//沒有定義的話不能檢查attributes
         if(F.getName() == "main") continue;
         if(F.hasFnAttribute("noinline")) continue;
         
-        if(F.use_empty() && !F.isDeclaration()){
+        if(F.use_empty() && F.hasFnAttribute("hello-inline")){//已經被inline而且有attribute
             toDelete.push_back(&F);
         }
     }
 
     for(Function *F:toDelete){
-        //errs() << "Function: " << F->getName() << " deleted\n";
         F->eraseFromParent();
     }    
 
