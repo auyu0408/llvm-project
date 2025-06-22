@@ -2,6 +2,7 @@
 #define LLVM_TRANSFORMS_HELLONEW_HELLO_H
 
 #include "llvm/IR/PassManager.h"
+#include "llvm/Passes/PassBuilder.h"
 
 namespace llvm{
     class HelloPass: public PassInfoMixin<HelloPass>{

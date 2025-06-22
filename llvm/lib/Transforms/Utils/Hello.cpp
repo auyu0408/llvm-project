@@ -6,6 +6,7 @@
 #include "llvm/ADT/SCCIterator.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h" // EntryBlock.front
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
@@ -14,6 +15,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h" // errs()
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -28,6 +30,9 @@
 
 using namespace llvm;
 #define NodeNo unsigned
+
+static cl::opt<bool> EnableHello("enable-hello", cl::init(false),
+    cl::desc("Enable Hello World pass"));
 
 namespace llvm{
     struct VectorHash{
@@ -225,11 +230,11 @@ void findMinCut(InstGraph& G, const std::unordered_set<NodeNo> &reachableFromSou
                     Value *v_v = To_Value[v][0];
                     if(Instruction *u_I = dyn_cast<Instruction>(u_v)){
                         sepInsts.push_back(u_I);
-                        errs() << *u_I << "\n";
+                        //errs() << *u_I << "\n";
                     }
                     if(Instruction *v_I = dyn_cast<Instruction>(v_v)){
                         sepInsts.push_back(v_I);
-                        errs() << "->" << *v_I << "\n";
+                        //errs() << "->" << *v_I << "\n";
                     }
                 }
             }
@@ -287,7 +292,7 @@ void addDependency(Value* src, Value* dest, std::unordered_map<Value *, std::vec
     while(!q.empty()){
         std::vector<Value *> path = q.front();
         q.pop();
-        if(dep > 200) {
+        if(dep > 350) {
             break;
         }
 
@@ -435,12 +440,20 @@ void mappingNode(std::vector<std::vector<Value *>> &SCCs, std::vector<std::vecto
 void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM){
     
     DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F); // 分析使用位置的 DominatorTree 
+
+    /***
+    errs() << "Function: " << F.getName() << "\n";
+    for(auto &BB:F){
+        errs() << BB;
+    }
+    ***/
      
     // 1. get Function info
     if(sepInsts[0]->isTerminator()){
         errs() << "Cut Instruction is Terminator\n";
         return;
     }
+    //errs() << "check ret\n";
     if(isa<ReturnInst>(sepInsts[0])||(sepInsts.size() > 1 && isa<ReturnInst>(sepInsts[1]))){
         errs() << "We don't need to split return instruction\n";
         return;
@@ -448,30 +461,74 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
 
     Module *M = F.getParent();
     Instruction *cutI;
-    if(find(sepInsts.begin(), sepInsts.end(), sepInsts[1]) == sepInsts.end()){
-        //errs() << "No enpugh Instructions to split\n";
+    if(sepInsts.size() < 2){
+        errs() << "No enough Instructions to split\n";
         return;
     }
     else cutI = sepInsts[1];
-    /***
-    errs() << cutI->getParent()->front() << "\n";
-    if(cutI == &(cutI->getParent()->front())){
-        errs() << "Cut Instruction is not the first instruction in BasicBlock\n";
-        return;
-    }
-    ***/
     BasicBlock *cutBB = cutI->getParent();
     BasicBlock *newCutBB = cutBB->splitBasicBlock(cutI, cutBB->getName() + ".split"); // build new BB
     Instruction *splitP = cutBB->getTerminator(); // 抓住cutI前一個指令作為 split 點，負責 call function 和 安插新 return
 
+    /***
+    errs() << "Cut Instruction: " << *cutI << "\n";
+    errs() << "After split\n";
+    errs() << "Cut BB: " << *cutBB << "\n";
+    errs() << "New Cut BB: " << *newCutBB << "\n";
+    ***/
+
     // 2. 蒐集要移出去的 BB
     std::vector<BasicBlock *> BlocksToMove;
+    
     BlocksToMove.push_back(newCutBB);
+    for (BasicBlock *Succ : successors(newCutBB)){
+        //errs() << "Successor of newCutBB: " << *Succ << "\n";
+        BlocksToMove.push_back(Succ);
+    }
+    /***
     for(auto &BB : F){
         if(&BB != newCutBB && &BB != cutBB && DT.dominates(cutBB, &BB)){
             BlocksToMove.push_back(&BB);
         }
-    }   
+    }  
+    ***/
+
+    // 2.5 紀錄入口，避免有多個
+    std::unordered_map<BasicBlock *, std::vector<BasicBlock *>> entryBlocks;
+    std::unordered_map<BasicBlock *, BranchInst *> BRcallers;
+    for(auto &BB:BlocksToMove){
+        for(BasicBlock *Pred : predecessors(BB)){
+            // BB: 一定要移動的 BasicBlock，Pred: 會跳到 BB 的 BasicBlock，BI: Branch 本人
+            if(find(BlocksToMove.begin(), BlocksToMove.end(), Pred) == BlocksToMove.end()){
+                /***
+                Instruction *Terminator = Pred->getTerminator();
+                if(!Terminator){
+                    errs() << "Error: Terminator not found in predecessor block: " << *Pred << "\n";
+                    return;
+                }
+                if(BranchInst *BI = dyn_cast<BranchInst>(Terminator)){
+                    //errs() << "BranchInst: " << *BI << "\n";
+                    BRcallers[Pred] = BI;
+                } else if(InvokeInst *II = dyn_cast<InvokeInst>(Terminator)){
+                    // 如果是 invoke 指令，則 Pred 是 entry block
+                    //entryBlocks[BB].push_back(Pred);
+                } else {
+                    // 其他情況，可能是 switch 或其他指令
+                    // errs() << "Pred: " << *Pred << " is not a Branch or Invoke instruction.\n";
+                }
+                ***/
+
+                entryBlocks[BB].push_back(Pred);
+            }
+        }
+    }
+
+    ///***
+    if(entryBlocks.size() > 1){
+        errs() << "Skip Branch\n";
+        return;
+    }
+    //***/
 
     // 3. 分析 LiveOuts
     // 找到所有 cutI 前的 Instruction，分析切割後程式 Live Range
@@ -485,6 +542,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
             for(auto &I:BB){
                 for(Use &U:I.uses()){
                     if(Instruction *useInst = dyn_cast<Instruction>(U.getUser())){
+                        //errs() << "Use: " << *useInst << "\n";
                         BasicBlock *useB = useInst->getParent();
                         if(std::find(BlocksToMove.begin(), BlocksToMove.end(), useB) != BlocksToMove.end()){
                             unsigned opIdx = U.getOperandNo();
@@ -511,12 +569,6 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
 
     if(LiveOuts.empty()){
         errs() << "No LiveOuts found, nothing to split.\n";
-        //errs() << "Name: " << F.getName() << "\n";
-        //for(auto Inst:sepInsts){
-        //    if(Instruction *I = dyn_cast<Instruction>(Inst)){
-        //        errs() << "Instruction: " << *I << "\n";
-        //    }
-        //}
         return;
     }
 
@@ -528,6 +580,12 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
         Type *argType = LiveOut->getType();
         argTypes.push_back(argType);
     }
+    // 如果有多個 entry block，則需要 selector argument，沒有加這個 argument 數量會錯
+    /***
+    if(entryBlocks.size() > 1){
+        argTypes.push_back(Type::getInt32Ty(M->getContext())); // selector type
+    }
+    ***/
 
     // 4-2. 取得return type，並與 argument type 建立 function type
     FunctionType *newFTy = FunctionType::get(FTy->getReturnType(), argTypes, false);
@@ -539,6 +597,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     ValueToValueMapTy VMap;
     unsigned argCount = 0;
     auto argIt = newFunc->arg_begin();
+    Value *select_val = nullptr;
     for(Value *V : LiveOuts){
         Value *arg = &*argIt++;
         //errs() << V->getName()  << "\n";
@@ -562,22 +621,107 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     }
     
     // 7. 建立新函數的 entry
-    BasicBlock *Entry = BasicBlock::Create(M->getContext(), "entry", newFunc);
-    IRBuilder<> Builder(Entry);
+    BasicBlock* entry;
+    /***
+    std::unordered_map<BasicBlock*, int> caseTable;
+    if(entryBlocks.size() > 1){
+        errs() << "Multiple entry blocks found for BlocksToMove.\n";
+        // 有多個 entry 所以需要 selector
+        entry = BasicBlock::Create(M->getContext(), "entry", newFunc);
+        // default block
+        BasicBlock *defaultBB = BasicBlock::Create(M->getContext(), "default", newFunc);
+        IRBuilder<> DBuilder(defaultBB);
+        DBuilder.CreateUnreachable();
+        
+        //selector 處理
+        Argument *selector = newFunc->getArg(argCount); //本來就是放在argument最後面
+        selector->setName("select_arg");
+        SwitchInst *switchInst = SwitchInst::Create(selector, defaultBB, entryBlocks.size()+1, entry);
+
+        //8. 移動 basic block
+        int caseIdx = 0;
+        IRBuilder<> EBuilder(entry);
+        for(auto &BB : BlocksToMove){
+            BB->removeFromParent();
+            BB->insertInto(newFunc, defaultBB);
+            if(entryBlocks.count(BB) != 0){
+                caseTable[BB] = caseIdx;
+                switchInst->addCase(ConstantInt::get(Type::getInt32Ty(M->getContext()), caseIdx++), BB);
+            }
+        }
+
+        ///***
+        // 9. 將原函數插入 Call, return
+        IRBuilder<> FBuilder(splitP);
+        std::vector<Value *> args;
+        for(Value *LiveOut : LiveOuts){
+            args.push_back(LiveOut);
+        }
+        args.push_back(FBuilder.getInt32(caseTable[newCutBB])); // selector argument
+        Value *CallResult = FBuilder.CreateCall(newFunc, args);
+        if(FTy->getReturnType()->isVoidTy()){
+            FBuilder.CreateRetVoid();
+        }
+        else{
+            FBuilder.CreateRet(CallResult);
+        } 
+        splitP->eraseFromParent(); // 刪除原本的指令
+
+        for(auto ele:entryBlocks){
+            BasicBlock *BB = ele.first;
+            if(BB == newCutBB) continue; // 不需要處理 newCutBB
+            std::vector<BasicBlock *> &Preds = ele.second;
+            for(BasicBlock *Pred : Preds){
+                BranchInst *BI = BRcallers[Pred];
+                Value *orCond = BI->getCondition();
+                BasicBlock *label0 = BI->getSuccessor(0);
+                BasicBlock *label1 = BI->getSuccessor(1);
+                BasicBlock *callBlock = BasicBlock::Create(M->getContext(), "call_"+std::to_string(caseTable[BB]), &F);
+                BasicBlock *continueBlock = nullptr;
+                if(label0 == BB){
+                    continueBlock = label1;
+                }
+                else if(label1 == BB){
+                    continueBlock = label0;
+                }
+
+                FBuilder.SetInsertPoint(BI);
+                FBuilder.CreateCondBr(orCond, callBlock, continueBlock);
+                BI->eraseFromParent(); // 刪除原本的指令
+
+                std::vector<Value *> args;
+                for(Value *LiveOut : LiveOuts){
+                    args.push_back(VMap[LiveOut]); // 使用映射的值
+                }
+                args.push_back(FBuilder.getInt32(caseTable[BB])); // selector argument
+                FBuilder.SetInsertPoint(callBlock);
+                Value *CallResult = FBuilder.CreateCall(newFunc, args);
+                if(FTy->getReturnType()->isVoidTy()){
+                    FBuilder.CreateRetVoid();
+                }
+                else{
+                    FBuilder.CreateRet(CallResult);
+                }
+            }
+        }
+
+        
+        for(auto &BB : F){
+            errs() << BB;
+        }
+        
+    }
+    else{
+    ***/
+    entry = BasicBlock::Create(M->getContext(), "entry", newFunc);
+    IRBuilder<> Builder(entry);
     Builder.CreateBr(newCutBB);
 
-    // 8. 移動 basic block
+    //8. 移動 basic block
     for(auto &BB : BlocksToMove){
         BB->removeFromParent();
         BB->insertInto(newFunc);
     }
-
-    /***
-    errs() << "New Function: " << newFunc->getName() << "\n";
-    for(auto &BB:*newFunc){
-        errs() << BB << "\n";
-    }
-    ***/
 
     // 9. 將原函數插入 Call, return
     IRBuilder<> FBuilder(splitP);
@@ -593,7 +737,21 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
         FBuilder.CreateRet(CallResult);
     }  
     splitP->eraseFromParent(); // 刪除原本的指令
+    //}
 
+    /***
+    errs() << "Ori Function:\n";
+    for(auto &BB : *newFunc){
+        errs() << BB;
+    }
+    ***/
+
+    /***
+    errs() << "New Function:\n";
+    for(auto &BB : *newFunc){
+        errs() << BB;
+    }
+    ***/
 
     //errs() << "Verify\n";
     bool broken = verifyFunction(*newFunc, &errs());
@@ -606,11 +764,25 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
 }
 
 PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
+    if(!EnableHello){
+        errs() << "skip Hello Pass\n";
+        return PreservedAnalyses::all();
+    }
+    else{
+        errs() << "Hello Pass is running\n";
+    }
+
     if(F.hasFnAttribute("noinline")) return PreservedAnalyses::all();
-    //if(F.getName() != "_ZSt4copyIPfPdET0_T_S3_S2_") return PreservedAnalyses::all();
+    //if(F.getName() != "Perl__is_in_locale_category") return PreservedAnalyses::all();
     // 檢查是不是要分開的function
     if(F.getName().ends_with("cloned")) return PreservedAnalyses::all();
     //errs() << F.getName() << "\n";
+    /***
+    errs() << "all IR\n";
+    for(auto &BB:F){
+        errs() << BB << "\n";
+    }
+    ***/
 
     // 先建立以instruction為主的cfg，建立FlowGraph並找到SCC（loop）
     std::unordered_map<Value *, std::vector<Value *>> CFG = buildGraph(F);
@@ -682,6 +854,12 @@ PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
                 }
             }
         }
+        F.addFnAttr("hello-inline"); // 避免被再次 inline
+    }
+
+    bool broken = verifyFunction(F, &errs());
+    if(broken){
+        errs() << "Function Verified failed.\n";
     }
 
     return PreservedAnalyses::none();
