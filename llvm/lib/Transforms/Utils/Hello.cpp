@@ -1,5 +1,6 @@
 //#include "lib/Transforms/Utils/CloneFunction.cpp"
 #include "llvm/Analysis/MemorySSA.h"
+#include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/ADT/BreadthFirstIterator.h" // 使用內建BFS來協助 fordFulkerson
 #include "llvm/ADT/GraphTraits.h"
@@ -238,7 +239,7 @@ void findMinCut(InstGraph& G, const std::unordered_set<NodeNo> &reachableFromSou
                         auto *v_I = dyn_cast<Instruction>(v_v);
                         sepInsts.push_back(v_I);
                         //errs() << "push v: ";
-                        //v_I->dump();
+                        //v->dump();
                         //errs() << "\n";
                     }
                 }
@@ -297,7 +298,7 @@ void addDependency(Value* src, Value* dest, std::unordered_map<Value *, std::vec
     while(!q.empty()){
         std::vector<Value *> path = q.front();
         q.pop();
-        if(dep > 350) {
+        if(dep > 300) {
             break;
         }
 
@@ -445,9 +446,11 @@ void mappingNode(std::vector<std::vector<Value *>> &SCCs, std::vector<std::vecto
 void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM){
     
     //DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F); // 分析使用位置的 DominatorTree 
+    //PostDominatorTree &PDT = AM.getResult<PostDominatorTreeAnalysis>(F);
 
     /***
     errs() << "Function: " << F.getName() << "\n";
+    /***
     for(auto &BB:F){
         errs() << BB;
     }
@@ -457,18 +460,18 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     Module *M = F.getParent();
     Instruction *cutI;
     if(sepInsts.size() < 2){
-        //errs() << "No enough Instructions to split\n";
+        errs() << "No enough Instructions to split\n";
         return;
     }
     else cutI = sepInsts[1];
     
     if(sepInsts[0]->isTerminator()){
-        //errs() << "Cut Instruction is Terminator\n";
+        errs() << "Cut Instruction is Terminator\n";
         return;
     }
     //errs() << "check ret\n";
     if(isa<ReturnInst>(sepInsts[0])||(sepInsts.size() > 1 && isa<ReturnInst>(sepInsts[1]))){
-        //errs() << "We don't need to split return instruction\n";
+        errs() << "We don't need to split return instruction\n";
         return;
     }
 
@@ -507,24 +510,6 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
         for(BasicBlock *Pred : predecessors(BB)){
             // BB: 一定要移動的 BasicBlock，Pred: 會跳到 BB 的 BasicBlock，BI: Branch 本人
             if(find(BlocksToMove.begin(), BlocksToMove.end(), Pred) == BlocksToMove.end()){
-                /***
-                Instruction *Terminator = Pred->getTerminator();
-                if(!Terminator){
-                    errs() << "Error: Terminator not found in predecessor block: " << *Pred << "\n";
-                    return;
-                }
-                if(BranchInst *BI = dyn_cast<BranchInst>(Terminator)){
-                    //errs() << "BranchInst: " << *BI << "\n";
-                    BRcallers[Pred] = BI;
-                } else if(InvokeInst *II = dyn_cast<InvokeInst>(Terminator)){
-                    // 如果是 invoke 指令，則 Pred 是 entry block
-                    //entryBlocks[BB].push_back(Pred);
-                } else {
-                    // 其他情況，可能是 switch 或其他指令
-                    // errs() << "Pred: " << *Pred << " is not a Branch or Invoke instruction.\n";
-                }
-                ***/
-
                 entryBlocks[BB].push_back(Pred);
             }
         }
@@ -532,7 +517,8 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
 
     ///***
     if(entryBlocks.size() > 1){
-        //errs() << "Skip Branch\n";
+        errs() << "Skip Branch\n";
+        MergeBlockIntoPredecessor(newCutBB);
         return;
     }
     //***/
@@ -549,7 +535,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
             for(auto &I:BB){
                 for(Use &U:I.uses()){
                     if(Instruction *useInst = dyn_cast<Instruction>(U.getUser())){
-                        //errs() << "Use: " << *useInst << "\n";
+                        useInst->dump();
                         BasicBlock *useB = useInst->getParent();
                         if(std::find(BlocksToMove.begin(), BlocksToMove.end(), useB) != BlocksToMove.end()){
                             unsigned opIdx = U.getOperandNo();
@@ -575,7 +561,8 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     }
 
     if(LiveOuts.empty()){
-        //errs() << "No LiveOuts found, nothing to split.\n";
+        errs() << "No LiveOuts found, nothing to split.\n";
+        MergeBlockIntoPredecessor(newCutBB);
         return;
     }
 
@@ -771,10 +758,10 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
 }
 
 PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
-    if(F.hasFnAttribute("noinline")) return PreservedAnalyses::all();
-    //if(F.getName() != "Perl_sv_cmp") return PreservedAnalyses::all();
+    if(F.hasFnAttribute("hello-inline")) return PreservedAnalyses::none();
+    //if(F.getName() != "PerlIOVia_flush") return PreservedAnalyses::none();
     // 檢查是不是要分開的function
-    if(F.getName().ends_with("cloned")) return PreservedAnalyses::all();
+    if(F.getName().ends_with("cloned")) return PreservedAnalyses::none();
     //errs() << F.getName() << "\n";
     /***
     errs() << "all IR\n";
