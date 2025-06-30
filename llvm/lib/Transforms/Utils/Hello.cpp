@@ -460,18 +460,18 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     Module *M = F.getParent();
     Instruction *cutI;
     if(sepInsts.size() < 2){
-        errs() << "No enough Instructions to split\n";
+        //errs() << "No enough Instructions to split\n";
         return;
     }
     else cutI = sepInsts[1];
     
     if(sepInsts[0]->isTerminator()){
-        errs() << "Cut Instruction is Terminator\n";
+        //errs() << "Cut Instruction is Terminator\n";
         return;
     }
     //errs() << "check ret\n";
     if(isa<ReturnInst>(sepInsts[0])||(sepInsts.size() > 1 && isa<ReturnInst>(sepInsts[1]))){
-        errs() << "We don't need to split return instruction\n";
+        //errs() << "We don't need to split return instruction\n";
         return;
     }
 
@@ -517,7 +517,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
 
     ///***
     if(entryBlocks.size() > 1){
-        errs() << "Skip Branch\n";
+        //errs() << "Skip Branch\n";
         MergeBlockIntoPredecessor(newCutBB);
         return;
     }
@@ -561,7 +561,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     }
 
     if(LiveOuts.empty()){
-        errs() << "No LiveOuts found, nothing to split.\n";
+        //errs() << "No LiveOuts found, nothing to split.\n";
         MergeBlockIntoPredecessor(newCutBB);
         return;
     }
