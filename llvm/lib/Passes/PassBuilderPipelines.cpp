@@ -226,6 +226,9 @@ static cl::opt<bool>
                            cl::desc("Enable DFA jump threading"),
                            cl::init(false), cl::Hidden);
 
+static cl::opt<bool> EnableHello("enable-hello", cl::init(false),
+    cl::desc("Enable Hello World pass"));//cl::Hidden是helper那邊不會寫但是helper-hidden會顯示
+
 static cl::opt<bool>
     EnableHotColdSplit("hot-cold-split",
                        cl::desc("Enable hot-cold splitting pass"));
@@ -1416,6 +1419,13 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   const bool LTOPreLink = isLTOPreLink(LTOPhase);
   ModulePassManager MPM;
 
+  if(EnableHello){
+    errs() << "Run Hello\n";
+    FunctionPassManager FPM;
+    FPM.addPass(HelloPass());
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+  }
+
   // Run partial inlining pass to partially inline functions that have
   // large bodies.
   if (RunPartialInlining)
@@ -1710,7 +1720,12 @@ PassBuilder::buildThinLTOPreLinkDefaultPipeline(OptimizationLevel Level) {
   // phase that will run after the thin link, running this here ends up with
   // less information than will be available later and it may grow functions in
   // ways that aren't beneficial.
-  if ()
+  if(EnableHello){
+    errs() << "Run Hello\n";
+    FunctionPassManager FPM;
+    FPM.addPass(HelloPass());
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+  }
 
   if (RunPartialInlining)
     MPM.addPass(PartialInlinerPass());
