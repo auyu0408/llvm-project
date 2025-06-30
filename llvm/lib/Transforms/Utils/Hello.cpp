@@ -535,7 +535,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
             for(auto &I:BB){
                 for(Use &U:I.uses()){
                     if(Instruction *useInst = dyn_cast<Instruction>(U.getUser())){
-                        useInst->dump();
+                        //useInst->dump();
                         BasicBlock *useB = useInst->getParent();
                         if(std::find(BlocksToMove.begin(), BlocksToMove.end(), useB) != BlocksToMove.end()){
                             unsigned opIdx = U.getOperandNo();
