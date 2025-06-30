@@ -31,9 +31,6 @@
 using namespace llvm;
 #define NodeNo unsigned
 
-static cl::opt<bool> EnableHello("enable-hello", cl::init(false),
-    cl::desc("Enable Hello World pass"));
-
 namespace llvm{
     struct VectorHash{
         template<class T>
@@ -226,15 +223,23 @@ void findMinCut(InstGraph& G, const std::unordered_set<NodeNo> &reachableFromSou
         if(reachableFromSource.count(u)){
             for(NodeNo v : neighbors){
                 if(!reachableFromSource.count(v) && G.capacity[{u, v}] > 0){
-                    Value *u_v = To_Value[u].back();
-                    Value *v_v = To_Value[v][0];
-                    if(Instruction *u_I = dyn_cast<Instruction>(u_v)){
+                    auto *u_v = To_Value[u].back();
+                    auto *v_v = To_Value[v][0];
+                    //errs() << "get u, v Value\n";
+                    if(u_v && dyn_cast<Instruction>(u_v)){
+                        auto *u_I = dyn_cast<Instruction>(u_v);
                         sepInsts.push_back(u_I);
-                        //errs() << *u_I << "\n";
+                        //errs() << "push u: ";
+                        //u_I->dump();
+                        //errs() << "\n";
+                        
                     }
-                    if(Instruction *v_I = dyn_cast<Instruction>(v_v)){
+                    if(v_v && dyn_cast<Instruction>(v_v)){
+                        auto *v_I = dyn_cast<Instruction>(v_v);
                         sepInsts.push_back(v_I);
-                        //errs() << "->" << *v_I << "\n";
+                        //errs() << "push v: ";
+                        //v_I->dump();
+                        //errs() << "\n";
                     }
                 }
             }
@@ -439,7 +444,7 @@ void mappingNode(std::vector<std::vector<Value *>> &SCCs, std::vector<std::vecto
 
 void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM){
     
-    DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F); // 分析使用位置的 DominatorTree 
+    //DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F); // 分析使用位置的 DominatorTree 
 
     /***
     errs() << "Function: " << F.getName() << "\n";
@@ -449,30 +454,32 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     ***/
      
     // 1. get Function info
+    Module *M = F.getParent();
+    Instruction *cutI;
+    if(sepInsts.size() < 2){
+        //errs() << "No enough Instructions to split\n";
+        return;
+    }
+    else cutI = sepInsts[1];
+    
     if(sepInsts[0]->isTerminator()){
-        errs() << "Cut Instruction is Terminator\n";
+        //errs() << "Cut Instruction is Terminator\n";
         return;
     }
     //errs() << "check ret\n";
     if(isa<ReturnInst>(sepInsts[0])||(sepInsts.size() > 1 && isa<ReturnInst>(sepInsts[1]))){
-        errs() << "We don't need to split return instruction\n";
+        //errs() << "We don't need to split return instruction\n";
         return;
     }
 
-    Module *M = F.getParent();
-    Instruction *cutI;
-    if(sepInsts.size() < 2){
-        errs() << "No enough Instructions to split\n";
-        return;
-    }
-    else cutI = sepInsts[1];
     BasicBlock *cutBB = cutI->getParent();
     BasicBlock *newCutBB = cutBB->splitBasicBlock(cutI, cutBB->getName() + ".split"); // build new BB
     Instruction *splitP = cutBB->getTerminator(); // 抓住cutI前一個指令作為 split 點，負責 call function 和 安插新 return
 
     /***
-    errs() << "Cut Instruction: " << *cutI << "\n";
-    errs() << "After split\n";
+    errs() << "Cut Instruction: ";
+    cutI->dump();
+    errs() << "\nAfter split\n";
     errs() << "Cut BB: " << *cutBB << "\n";
     errs() << "New Cut BB: " << *newCutBB << "\n";
     ***/
@@ -525,7 +532,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
 
     ///***
     if(entryBlocks.size() > 1){
-        errs() << "Skip Branch\n";
+        //errs() << "Skip Branch\n";
         return;
     }
     //***/
@@ -568,7 +575,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     }
 
     if(LiveOuts.empty()){
-        errs() << "No LiveOuts found, nothing to split.\n";
+        //errs() << "No LiveOuts found, nothing to split.\n";
         return;
     }
 
@@ -597,7 +604,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     ValueToValueMapTy VMap;
     unsigned argCount = 0;
     auto argIt = newFunc->arg_begin();
-    Value *select_val = nullptr;
+    //Value *select_val = nullptr;
     for(Value *V : LiveOuts){
         Value *arg = &*argIt++;
         //errs() << V->getName()  << "\n";
@@ -764,16 +771,8 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
 }
 
 PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
-    if(!EnableHello){
-        errs() << "skip Hello Pass\n";
-        return PreservedAnalyses::all();
-    }
-    else{
-        errs() << "Hello Pass is running\n";
-    }
-
     if(F.hasFnAttribute("noinline")) return PreservedAnalyses::all();
-    //if(F.getName() != "Perl__is_in_locale_category") return PreservedAnalyses::all();
+    //if(F.getName() != "Perl_sv_cmp") return PreservedAnalyses::all();
     // 檢查是不是要分開的function
     if(F.getName().ends_with("cloned")) return PreservedAnalyses::all();
     //errs() << F.getName() << "\n";
@@ -783,6 +782,11 @@ PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
         errs() << BB << "\n";
     }
     ***/
+    // 可變參數
+    FunctionType *FT = F.getFunctionType();
+    if(FT->isVarArg()){
+        return PreservedAnalyses::all();
+    }
 
     // 先建立以instruction為主的cfg，建立FlowGraph並找到SCC（loop）
     std::unordered_map<Value *, std::vector<Value *>> CFG = buildGraph(F);
