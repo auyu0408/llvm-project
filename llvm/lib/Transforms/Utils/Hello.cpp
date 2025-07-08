@@ -780,11 +780,22 @@ PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
     if(FT->isVarArg()){
         return PreservedAnalyses::all();
     }
+    int count = 0;
+    for(auto *U:F.users()){
+        if(auto *call = dyn_cast<CallInst>(U)){
+            if(call->getCalledFunction() == &F){
+                count++;
+            }
+        }
+    }
 
     // 先建立以instruction為主的cfg，建立FlowGraph並找到SCC（loop）
     std::unordered_map<Value *, std::vector<Value *>> CFG = buildGraph(F);
     if(CFG.size() >= 1500){
-	return PreservedAnalyses::all();
+	    return PreservedAnalyses::all();
+    }
+    if(count >= 15){
+        return PreservedAnalyses::all();
     }
     FlowGraph FG(CFG);
     GraphTraits<FlowGraph>::G = &FG;
