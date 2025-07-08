@@ -97,6 +97,8 @@ namespace llvm{
                 }
             }
         }
+
+
     };
 
     template<> struct GraphTraits<FlowGraph>{
@@ -298,7 +300,7 @@ void addDependency(Value* src, Value* dest, std::unordered_map<Value *, std::vec
     while(!q.empty()){
         std::vector<Value *> path = q.front();
         q.pop();
-        if(dep > 300) {
+        if(dep > 280) {
             break;
         }
 
@@ -465,6 +467,9 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     }
     else cutI = sepInsts[1];
     
+    if(isa<PHINode>(cutI)){
+        cutI = cutI -> getNextNode(); // PHI node 不能被切割，所以要往後找
+    }
     if(sepInsts[0]->isTerminator()){
         //errs() << "Cut Instruction is Terminator\n";
         return;
@@ -482,6 +487,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     /***
     errs() << "Cut Instruction: ";
     cutI->dump();
+    /***
     errs() << "\nAfter split\n";
     errs() << "Cut BB: " << *cutBB << "\n";
     errs() << "New Cut BB: " << *newCutBB << "\n";
@@ -777,6 +783,9 @@ PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
 
     // 先建立以instruction為主的cfg，建立FlowGraph並找到SCC（loop）
     std::unordered_map<Value *, std::vector<Value *>> CFG = buildGraph(F);
+    if(CFG.size() >= 1500){
+	return PreservedAnalyses::all();
+    }
     FlowGraph FG(CFG);
     GraphTraits<FlowGraph>::G = &FG;
 
