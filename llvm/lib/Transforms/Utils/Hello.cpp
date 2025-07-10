@@ -445,9 +445,9 @@ void mappingNode(std::vector<std::vector<Value *>> &SCCs, std::vector<std::vecto
     return;
 }
 
-void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM){
+bool splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM){
     
-    //DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F); // 分析使用位置的 DominatorTree 
+    //auto &DT = AM.getResult<DominatorTreeAnalysis>(F); // 分析使用位置的 DominatorTree 
     //PostDominatorTree &PDT = AM.getResult<PostDominatorTreeAnalysis>(F);
 
     /***
@@ -463,7 +463,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     Instruction *cutI;
     if(sepInsts.size() < 2){
         //errs() << "No enough Instructions to split\n";
-        return;
+        return false;
     }
     else cutI = sepInsts[1];
     
@@ -472,12 +472,12 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     }
     if(sepInsts[0]->isTerminator()){
         //errs() << "Cut Instruction is Terminator\n";
-        return;
+        return false;
     }
     //errs() << "check ret\n";
     if(isa<ReturnInst>(sepInsts[0])||(sepInsts.size() > 1 && isa<ReturnInst>(sepInsts[1]))){
         //errs() << "We don't need to split return instruction\n";
-        return;
+        return false;
     }
 
     BasicBlock *cutBB = cutI->getParent();
@@ -495,11 +495,33 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
 
     // 2. 蒐集要移出去的 BB
     std::vector<BasicBlock *> BlocksToMove;
+    std::queue<BasicBlock *> BBQueue;
+    bool PHIfound = false;
     
     BlocksToMove.push_back(newCutBB);
-    for (BasicBlock *Succ : successors(newCutBB)){
-        //errs() << "Successor of newCutBB: " << *Succ << "\n";
-        BlocksToMove.push_back(Succ);
+    BBQueue.push(newCutBB);
+    while(BBQueue.size() > 0){
+        BasicBlock *BB = BBQueue.front();
+        BBQueue.pop();
+        //errs() << "BB: " << *BB << "\n";
+        for (BasicBlock *Succ : successors(BB)) {
+            for(Instruction &I : *Succ){
+                if(isa<PHINode>(I)){
+                    PHIfound = true;
+                    break;
+                }
+            }
+            if (std::find(BlocksToMove.begin(), BlocksToMove.end(), Succ) == BlocksToMove.end()) {
+                BlocksToMove.push_back(Succ);
+                BBQueue.push(Succ);
+            }
+        }
+    }
+
+    if(PHIfound){
+        //errs() << "No PHI split.\n";
+        MergeBlockIntoPredecessor(newCutBB);
+        return false;
     }
     /***
     for(auto &BB : F){
@@ -525,7 +547,7 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     if(entryBlocks.size() > 1){
         //errs() << "Skip Branch\n";
         MergeBlockIntoPredecessor(newCutBB);
-        return;
+        return false;
     }
     //***/
 
@@ -567,9 +589,9 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     }
 
     if(LiveOuts.empty()){
-        //errs() << "No LiveOuts found, nothing to split.\n";
+        errs() << "No LiveOuts found, nothing to split.\n";
         MergeBlockIntoPredecessor(newCutBB);
-        return;
+        return false;
     }
 
     // 4. 建立 function 
@@ -580,12 +602,6 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
         Type *argType = LiveOut->getType();
         argTypes.push_back(argType);
     }
-    // 如果有多個 entry block，則需要 selector argument，沒有加這個 argument 數量會錯
-    /***
-    if(entryBlocks.size() > 1){
-        argTypes.push_back(Type::getInt32Ty(M->getContext())); // selector type
-    }
-    ***/
 
     // 4-2. 取得return type，並與 argument type 建立 function type
     FunctionType *newFTy = FunctionType::get(FTy->getReturnType(), argTypes, false);
@@ -622,97 +638,6 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
     
     // 7. 建立新函數的 entry
     BasicBlock* entry;
-    /***
-    std::unordered_map<BasicBlock*, int> caseTable;
-    if(entryBlocks.size() > 1){
-        errs() << "Multiple entry blocks found for BlocksToMove.\n";
-        // 有多個 entry 所以需要 selector
-        entry = BasicBlock::Create(M->getContext(), "entry", newFunc);
-        // default block
-        BasicBlock *defaultBB = BasicBlock::Create(M->getContext(), "default", newFunc);
-        IRBuilder<> DBuilder(defaultBB);
-        DBuilder.CreateUnreachable();
-        
-        //selector 處理
-        Argument *selector = newFunc->getArg(argCount); //本來就是放在argument最後面
-        selector->setName("select_arg");
-        SwitchInst *switchInst = SwitchInst::Create(selector, defaultBB, entryBlocks.size()+1, entry);
-
-        //8. 移動 basic block
-        int caseIdx = 0;
-        IRBuilder<> EBuilder(entry);
-        for(auto &BB : BlocksToMove){
-            BB->removeFromParent();
-            BB->insertInto(newFunc, defaultBB);
-            if(entryBlocks.count(BB) != 0){
-                caseTable[BB] = caseIdx;
-                switchInst->addCase(ConstantInt::get(Type::getInt32Ty(M->getContext()), caseIdx++), BB);
-            }
-        }
-
-        ///***
-        // 9. 將原函數插入 Call, return
-        IRBuilder<> FBuilder(splitP);
-        std::vector<Value *> args;
-        for(Value *LiveOut : LiveOuts){
-            args.push_back(LiveOut);
-        }
-        args.push_back(FBuilder.getInt32(caseTable[newCutBB])); // selector argument
-        Value *CallResult = FBuilder.CreateCall(newFunc, args);
-        if(FTy->getReturnType()->isVoidTy()){
-            FBuilder.CreateRetVoid();
-        }
-        else{
-            FBuilder.CreateRet(CallResult);
-        } 
-        splitP->eraseFromParent(); // 刪除原本的指令
-
-        for(auto ele:entryBlocks){
-            BasicBlock *BB = ele.first;
-            if(BB == newCutBB) continue; // 不需要處理 newCutBB
-            std::vector<BasicBlock *> &Preds = ele.second;
-            for(BasicBlock *Pred : Preds){
-                BranchInst *BI = BRcallers[Pred];
-                Value *orCond = BI->getCondition();
-                BasicBlock *label0 = BI->getSuccessor(0);
-                BasicBlock *label1 = BI->getSuccessor(1);
-                BasicBlock *callBlock = BasicBlock::Create(M->getContext(), "call_"+std::to_string(caseTable[BB]), &F);
-                BasicBlock *continueBlock = nullptr;
-                if(label0 == BB){
-                    continueBlock = label1;
-                }
-                else if(label1 == BB){
-                    continueBlock = label0;
-                }
-
-                FBuilder.SetInsertPoint(BI);
-                FBuilder.CreateCondBr(orCond, callBlock, continueBlock);
-                BI->eraseFromParent(); // 刪除原本的指令
-
-                std::vector<Value *> args;
-                for(Value *LiveOut : LiveOuts){
-                    args.push_back(VMap[LiveOut]); // 使用映射的值
-                }
-                args.push_back(FBuilder.getInt32(caseTable[BB])); // selector argument
-                FBuilder.SetInsertPoint(callBlock);
-                Value *CallResult = FBuilder.CreateCall(newFunc, args);
-                if(FTy->getReturnType()->isVoidTy()){
-                    FBuilder.CreateRetVoid();
-                }
-                else{
-                    FBuilder.CreateRet(CallResult);
-                }
-            }
-        }
-
-        
-        for(auto &BB : F){
-            errs() << BB;
-        }
-        
-    }
-    else{
-    ***/
     entry = BasicBlock::Create(M->getContext(), "entry", newFunc);
     IRBuilder<> Builder(entry);
     Builder.CreateBr(newCutBB);
@@ -737,35 +662,36 @@ void splitFunc(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysi
         FBuilder.CreateRet(CallResult);
     }  
     splitP->eraseFromParent(); // 刪除原本的指令
-    //}
 
-    /***
+    ///***
     errs() << "Ori Function:\n";
-    for(auto &BB : *newFunc){
+    for(auto &BB : F){
         errs() << BB;
     }
-    ***/
+    //***/
 
-    /***
+    ///***
     errs() << "New Function:\n";
     for(auto &BB : *newFunc){
         errs() << BB;
     }
-    ***/
+    //***/
 
+    auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
     //errs() << "Verify\n";
     bool broken = verifyFunction(*newFunc, &errs());
     if(broken){
         errs() << "Function Verified failed.\n";
-        return;
+        return false;
     }
 
-    return;
+    return true;
 }
 
 PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
     if(F.hasFnAttribute("hello-inline")) return PreservedAnalyses::none();
-    //if(F.getName() != "PerlIOVia_flush") return PreservedAnalyses::none();
+    if(F.getLinkage() == GlobalValue::LinkOnceODRLinkage) return PreservedAnalyses::none();
+    //if(F.getName() != "_ZN11xercesc_2_711DStringPool15getPooledStringERKNS_9DOMStringE") return PreservedAnalyses::none();
     // 檢查是不是要分開的function
     if(F.getName().ends_with("cloned")) return PreservedAnalyses::none();
     //errs() << F.getName() << "\n";
@@ -849,23 +775,25 @@ PreservedAnalyses HelloPass::run(Function &F, FunctionAnalysisManager &AM){
     Instruction *target = getLatestReturn(F, PDT);
 
     int maxFlow = fordFulkerson(IG, source, target, rfs);
-    //errs() << F.getName() << ", MaximumFlow: " << maxFlow << "\n";
+    //errs() << F.getName() << ", MaximumFlow: " << maxFlow << "\n"; 
     if(maxFlow != 0){
         std::vector<Instruction *> sepInsts;
         findMinCut(IG, rfs, sepInsts);
 
         //errs() << "create new basic block\n";
-        splitFunc(sepInsts, F, AM);
+        bool res = splitFunc(sepInsts, F, AM);
         //errs() << "Inline function\n";
-        for(auto *U:F.users()){
-            if(auto *call = dyn_cast<CallInst>(U)){
-                if(call->getCalledFunction() == &F){
-                    InlineFunctionInfo IFI;
-                    InlineFunction(*call, IFI);
+        if(res){
+            for(auto *U:F.users()){
+                if(auto *call = dyn_cast<CallInst>(U)){
+                    if(call->getCalledFunction() == &F){
+                        InlineFunctionInfo IFI;
+                        InlineFunction(*call, IFI);
+                    }
                 }
             }
+            F.addFnAttr("hello-inline"); // 避免被再次 inline
         }
-        F.addFnAttr("hello-inline"); // 避免被再次 inline
     }
 
     bool broken = verifyFunction(F, &errs());
