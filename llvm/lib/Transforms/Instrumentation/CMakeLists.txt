@@ -27,6 +27,8 @@ add_llvm_component_library(LLVMInstrumentation
   HWAddressSanitizer.cpp
   RealtimeSanitizer.cpp
 
+  FunctionID.cpp
+
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms
 

@@ -32,8 +32,11 @@ add_llvm_component_library(LLVMTransformUtils
   GlobalStatus.cpp
   GuardUtils.cpp
 
-  Hello.cpp
+  MyFunction.cpp
+  MyPass.cpp
+  MyPass2.cpp
   NewMod.cpp
+  ReadIn.cpp
 
   HelloWorld.cpp
   InlineFunction.cpp
@@ -95,7 +98,7 @@ add_llvm_component_library(LLVMTransformUtils
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms/Utils
-
+  
   DEPENDS
   intrinsics_gen
 

@@ -41,6 +41,9 @@ add_llvm_component_library(LLVMAnalysis
   CallGraph.cpp
   CallGraphSCCPass.cpp
   CallPrinter.cpp
+
+  CallsiteInfo.cpp
+
   CaptureTracking.cpp
   CmpInstAnalysis.cpp
   CostModel.cpp
@@ -72,7 +75,9 @@ add_llvm_component_library(LLVMAnalysis
   ImportedFunctionsInliningStatistics.cpp
   IndirectCallPromotionAnalysis.cpp
   InlineCost.cpp
+  
   InlineAdvisor.cpp
+
   InlineOrder.cpp
   InlineSizeEstimatorAnalysis.cpp
   InstCount.cpp

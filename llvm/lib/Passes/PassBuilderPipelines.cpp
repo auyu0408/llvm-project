@@ -144,7 +144,8 @@
 #include "llvm/Transforms/Vectorize/SLPVectorizer.h"
 #include "llvm/Transforms/Vectorize/VectorCombine.h"
 
-#include "llvm/Transforms/Utils/Hello.h"
+#include "llvm/Analysis/CallsiteInfo.h"
+#include <cstdlib>
 
 using namespace llvm;
 
@@ -226,8 +227,11 @@ static cl::opt<bool>
                            cl::desc("Enable DFA jump threading"),
                            cl::init(false), cl::Hidden);
 
-static cl::opt<bool> EnableHello("enable-hello", cl::init(false),
-    cl::desc("Enable Hello World pass"));//cl::Hidden是helper那邊不會寫但是helper-hidden會顯示
+//static cl::opt<bool> EnableHello("enable-hello", cl::init(false),
+//    cl::desc("Enable Hello World pass"));//cl::Hidden是helper那邊不會寫但是helper-hidden會顯示
+static cl::opt<bool> RecordCallsiteInfo("record-callsite-info", cl::init(false),
+    cl::desc("Enable callsite info"));
+    
 
 static cl::opt<bool>
     EnableHotColdSplit("hot-cold-split",
@@ -307,7 +311,7 @@ static cl::opt<std::string> InstrumentColdFuncOnlyPath(
              "with --pgo-instrument-cold-function-only)"),
     cl::Hidden);
 
-extern cl::opt<bool> EnableHello;
+//extern cl::opt<bool> EnableHello;
 
 extern cl::opt<std::string> UseCtxProfile;
 extern cl::opt<bool> PGOInstrumentColdFunctionOnly;
@@ -1253,6 +1257,11 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
 
   MPM.addPass(AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/true));
 
+  if (RecordCallsiteInfo) {
+    MPM.addPass(CallsiteInfoPass());
+    return MPM;
+  }
+
   if (EnableModuleInliner)
     MPM.addPass(buildModuleInlinerPipeline(Level, Phase));
   else
@@ -1419,12 +1428,14 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   const bool LTOPreLink = isLTOPreLink(LTOPhase);
   ModulePassManager MPM;
 
+  /***
   if(EnableHello){
     errs() << "Run Hello\n";
     FunctionPassManager FPM;
     FPM.addPass(HelloPass());
     MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
   }
+  ***/
 
   // Run partial inlining pass to partially inline functions that have
   // large bodies.
@@ -1720,12 +1731,14 @@ PassBuilder::buildThinLTOPreLinkDefaultPipeline(OptimizationLevel Level) {
   // phase that will run after the thin link, running this here ends up with
   // less information than will be available later and it may grow functions in
   // ways that aren't beneficial.
+  /***
   if(EnableHello){
     errs() << "Run Hello\n";
     FunctionPassManager FPM;
     FPM.addPass(HelloPass());
     MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
   }
+  ***/
 
   if (RunPartialInlining)
     MPM.addPass(PartialInlinerPass());
