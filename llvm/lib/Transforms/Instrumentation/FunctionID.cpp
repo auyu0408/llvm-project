@@ -132,10 +132,10 @@ PreservedAnalyses FunctionIDPass::run(Module &M, ModuleAnalysisManager &AM) {
             auto &Ctx = M.getContext();
             auto *N = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(
                                            Ctx, APInt{64, CallBaseID++, false})));
-            if((Callee && Callee->getName().ends_with("cloned")) || Callee->hasFnAttribute("hello-inline")){
+            if(Callee && (Callee->getName().ends_with("cloned") || Callee->hasFnAttribute("hello-inline"))){
               CB->setMetadata("callbase.id", NULL); // already cloned function, do not process again
             }
-            else if((Caller && Caller->getName().ends_with("cloned")) || Caller->hasFnAttribute("hello-inline")){
+            else if(Caller && (Caller->getName().ends_with("cloned") || Caller->hasFnAttribute("hello-inline"))){
               CB->setMetadata("callbase.id", NULL);
             }
             else{
