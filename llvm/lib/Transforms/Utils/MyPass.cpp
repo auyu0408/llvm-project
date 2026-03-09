@@ -4,13 +4,11 @@
 using namespace llvm;
 
 PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
-    //if(F.hasFnAttribute("hello-inline")) return PreservedAnalyses::none();
-    //if(F.hasLinkOnceLinkage() && !F.hasLinkOnceODRLinkage()) return PreservedAnalyses::none();
-    //if(F.getName() != "Perl_init_i18nl10n") return PreservedAnalyses::none(); //errs() << F.getName() << " " << F.getInstructionCount() << "\n";
+    if (F.isDeclaration()) return PreservedAnalyses::all();
+    if (F.getName().empty()) return PreservedAnalyses::all();
     if(F.getName().ends_with("cloned")) return PreservedAnalyses::none(); //已經split的不可再次處理
-    //errs() << F.getName() << "\n";
 
-    // 如果這個function有地方需要inline，才處理
+    // 如果這個function有地方需要inline
     bool inlined_flag = 0;
     for(auto *U:F.users()){
         if(auto *CB = dyn_cast<CallBase>(U)){
@@ -96,9 +94,7 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
         std::vector<Instruction *> sepInsts;
         findMinCut(IG, rfs, sepInsts);
 
-        //errs() << "create new basic block\n";
         bool res = splitFunction(sepInsts, F, AM);
-        //errs() << "Inline function\n";
         if(res){
             for(auto *U:F.users()){
                 if(auto *CI = dyn_cast<CallInst>(U)){
@@ -112,7 +108,6 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
                         if(!hasPassVal(CB)) continue;
                         auto res =  getPassVal(CB);
                         if((Callee == &F) && res){
-                            //errs() << (Caller->getName()).str() << "," << (Callee->getName()).str() << "," << "inlined\n";
                             InlineFunctionInfo IFI;
                             InlineFunction(*CI, IFI);//這邊會用到CI，前面是用到CB所以兩個都要
                         }

@@ -4,7 +4,8 @@
 using namespace llvm;
 
 PreservedAnalyses MyPass2::run(Function &F, FunctionAnalysisManager &AM){
-    if(F.hasFnAttribute("MyPass")) return PreservedAnalyses::none();
+    if (F.isDeclaration()) return PreservedAnalyses::all();
+    if (F.getName().empty()) return PreservedAnalyses::all();
     
     // function有地方需要inline才處理
     bool inlined_flag = 0;
