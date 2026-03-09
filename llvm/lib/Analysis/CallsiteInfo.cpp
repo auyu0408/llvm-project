@@ -1,6 +1,5 @@
 #include "llvm/Analysis/CallsiteInfo.h"
 #include "llvm/Passes/PassBuilder.h"
-#include "llvm/Transforms/Utils/MyFunction.h"
 
 #include <fstream>
 #include <string>
@@ -9,8 +8,8 @@ using namespace llvm;
 
 PreservedAnalyses CallsiteInfoPass::run(Module &M, ModuleAnalysisManager &AM) {
     std::ofstream outfile;
-    if(OutFilePath.empty()) outfile.open("output.decisions");
-    else outfile.open(OutFilePath);
+    if(OutFilePath.empty()) OutFilePath = InputFilePath.getValue();
+    outfile.open(OutFilePath);
 
     if(!outfile){
         errs() << "open outputfile failed.\n";

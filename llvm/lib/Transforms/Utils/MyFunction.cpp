@@ -2,6 +2,12 @@
 
 using namespace llvm;
 
+cl::opt<std::string> InputFilePath(
+    "input-file",
+    cl::desc("Path to the input file for decision."),
+    cl::value_desc("filename"),
+    cl::init(""));
+
 namespace llvm{
     std::unordered_map<Value *, NodeNo> To_Node;
     std::unordered_map<NodeNo, std::vector<Value *>> To_Value;
@@ -82,6 +88,13 @@ bool getPassVal(const CallBase *CB) {
     Constant *C = dyn_cast<ConstantAsMetadata>(dyn_cast<MDNode>(N)->getOperand(0))
                         ->getValue();
     return cast<ConstantInt>(C)->isOne();
+}
+
+void setPassVal(CallBase *CB, bool val) {
+    auto &Ctx = CB->getContext();
+    ConstantInt *CI = ConstantInt::get(Type::getInt1Ty(Ctx), val ? 1 : 0);
+    MDNode *N = MDNode::get(Ctx, {ConstantAsMetadata::get(CI)});
+    CB->setMetadata("goPass", N);
 }
 
 int fordFulkerson(InstGraph& G, Value* source, Value* target,
@@ -306,7 +319,7 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
         errs() << "Cut Instruction is Terminator\n";
         return false;
     }
-    errs() << "check ret\n";
+    //errs() << "check ret\n";
     if(isa<ReturnInst>(sepInsts[0])||(sepInsts.size() > 1 && isa<ReturnInst>(sepInsts[1]))){
         errs() << "We don't need to split return instruction\n";
         return false;
