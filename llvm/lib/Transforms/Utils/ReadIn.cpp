@@ -8,12 +8,6 @@
 
 using namespace llvm;
 
-static cl::opt<std::string> InputFilePath(
-    "input-file",
-    cl::desc("Path to the input file for decision."),
-    cl::value_desc("filename"),
-    cl::init(""));
-
 PreservedAnalyses ReadInPass::run(Module &M, ModuleAnalysisManager &AM) {
     std::set<CallBase *> CBs;
     std::map<MDNode *, CallBase *> CBs_id;
@@ -99,7 +93,6 @@ PreservedAnalyses ReadInPass::run(Module &M, ModuleAnalysisManager &AM) {
         auto *NewMD = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(Type::getInt1Ty(
                                       Ctx), 0)));
         if(arr[3] == "inlined"){
-            errs() << arr[0] << " " << arr[1] << "\n";
             NewMD = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(Type::getInt1Ty(
                                       Ctx), 1)));
         }
