@@ -158,6 +158,7 @@ MODULE_PASS("new-mod", NewModPass())
 MODULE_PASS("function-id", FunctionIDPass())
 MODULE_PASS("callsite-info", CallsiteInfoPass())
 MODULE_PASS("read-in", ReadInPass())
+MODULE_PASS("one-pi", OnePassPIPass())
 #undef MODULE_PASS
 
 #ifndef MODULE_PASS_WITH_PARAMS

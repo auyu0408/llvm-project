@@ -335,6 +335,7 @@
 #include "llvm/Transforms/Utils/NewMod.h"
 #include "llvm/Transforms/Utils/ReadIn.h"
 #include "llvm/Transforms/Instrumentation/FunctionID.h"
+#include "llvm/Transforms/Utils/OnePassPI.h"
 
 #include "llvm/Transforms/Vectorize/LoadStoreVectorizer.h"
 #include "llvm/Transforms/Vectorize/LoopIdiomVectorize.h"
