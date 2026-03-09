@@ -43,7 +43,7 @@ PreservedAnalyses ReadInPass::run(Module &M, ModuleAnalysisManager &AM) {
                 if(CalledFunction){
                     CBs.insert(CB);
                     auto *CBID = CB->getMetadata("callbase.id");
-                    CBs_id[CBID] = CB;
+                    if (CBID) CBs_id[CBID] = CB;
                 }
             }
         }
@@ -89,7 +89,9 @@ PreservedAnalyses ReadInPass::run(Module &M, ModuleAnalysisManager &AM) {
         auto &Ctx = M.getContext();
         auto temp_MDNode = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(
                         Ctx, APInt{64, id, false})));
-        auto *CB = CBs_id[temp_MDNode];
+        auto it = CBs_id.find(temp_MDNode);
+        if (it == CBs_id.end() || !it->second) continue;
+        auto *CB = it->second;
         auto *NewMD = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(Type::getInt1Ty(
                                       Ctx), 0)));
         if(arr[3] == "inlined"){
