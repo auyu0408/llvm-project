@@ -37,6 +37,7 @@ add_llvm_component_library(LLVMTransformUtils
   MyPass2.cpp
   NewMod.cpp
   ReadIn.cpp
+  OnePassPI.cpp
 
   HelloWorld.cpp
   InlineFunction.cpp
@@ -104,6 +105,9 @@ add_llvm_component_library(LLVMTransformUtils
 
   LINK_COMPONENTS
   Analysis
+  
+  BitWriter
+
   Core
   Support
   TargetParser
