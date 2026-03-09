@@ -116,8 +116,10 @@ namespace llvm{
     extern const FlowGraph* G;
 }//namespace llvm
 
+extern cl::opt<std::string> InputFilePath;
 bool hasPassVal(const CallBase *CB);
 bool getPassVal(const CallBase *CB);
+void setPassVal(CallBase *CB, bool val);
 size_t getCallBaseId(const CallBase *CB);
 bool hasCallBaseId(const CallBase *CB);
 int fordFulkerson(InstGraph& G, Value* source, Value* target,
