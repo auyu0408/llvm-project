@@ -447,6 +447,8 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
     //4-3. 建立新的 function
     std::string newFuncName = F.getName().str() + "_cloned";
     Function *newFunc = Function::Create(newFTy, F.getLinkage(), newFuncName, M);
+    // 複製原函式的所有 attributes（包括 target-features, target-cpu 等）
+    newFunc->setAttributes(F.getAttributes());
     if(F.hasPersonalityFn()){
         newFunc->setPersonalityFn(F.getPersonalityFn());
     }
