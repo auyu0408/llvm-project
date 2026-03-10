@@ -6,6 +6,7 @@ using namespace llvm;
 PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
     if (F.isDeclaration()) return PreservedAnalyses::all();
     if (F.getName().empty()) return PreservedAnalyses::all();
+    if (F.hasFnAttribute(Attribute::AlwaysInline)) return PreservedAnalyses::all();
     if(F.getName().ends_with("cloned")) return PreservedAnalyses::none(); //已經split的不可再次處理
 
     // 如果這個function有地方需要inline

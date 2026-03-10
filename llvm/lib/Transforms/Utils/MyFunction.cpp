@@ -447,8 +447,13 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
     //4-3. 建立新的 function
     std::string newFuncName = F.getName().str() + "_cloned";
     Function *newFunc = Function::Create(newFTy, F.getLinkage(), newFuncName, M);
-    // 複製原函式的所有 attributes（包括 target-features, target-cpu 等）
-    newFunc->setAttributes(F.getAttributes());
+    // 只複製 function-level attributes（target-features, target-cpu 等）
+    // 不能用 setAttributes() 因為會把參數屬性也複製（型別不同會出錯）
+    newFunc->setAttributes(AttributeList::get(
+        M->getContext(), AttributeList::FunctionIndex,
+        F.getAttributes().getFnAttrs()));
+    // 移除 alwaysinline（避免跟 noinline 衝突）
+    newFunc->removeFnAttr(Attribute::AlwaysInline);
     if(F.hasPersonalityFn()){
         newFunc->setPersonalityFn(F.getPersonalityFn());
     }
@@ -507,21 +512,7 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
     }  
     splitP->eraseFromParent(); // 刪除原本的指令
     newFunc->addFnAttr(Attribute::NoInline);
-    errs() << "Function: " << F.getName() << " split to " << newFunc->getName() << "\n";
-
-    /***
-    errs() << "Ori Function:\n";
-    for(auto &BB : F){
-        errs() << BB;
-    }
-    ***/
-
-    /***
-    errs() << "New Function:\n";
-    for(auto &BB : *newFunc){
-        errs() << BB;
-    }
-    ***/
+    //errs() << "Function: " << F.getName() << " split to " << newFunc->getName() << "\n";
 
     //auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
     //errs() << "Verify\n";
