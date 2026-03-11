@@ -83,6 +83,7 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
     //exportCFG(IG, F.getName()); // 印出Graph來看
     
     // Minimum Cut
+    if(F.arg_empty()) return PreservedAnalyses::all();
     std::unordered_set<NodeNo> rfs;
     Value *source = F.args().begin();
 

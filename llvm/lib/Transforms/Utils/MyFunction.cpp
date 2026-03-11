@@ -263,6 +263,7 @@ Instruction* getLatestReturn(Function &F, PostDominatorTree &PDT){
     BasicBlock *lastBB = returns[0] -> getParent();
     for(ReturnInst* ret:returns){
         lastBB = PDT.findNearestCommonDominator(lastBB, ret->getParent());
+        if(!lastBB) return nullptr;
     }
 
     return lastBB->getTerminator();
