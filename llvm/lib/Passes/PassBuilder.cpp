@@ -327,6 +327,16 @@
 #include "llvm/Transforms/Utils/SymbolRewriter.h"
 #include "llvm/Transforms/Utils/UnifyFunctionExitNodes.h"
 #include "llvm/Transforms/Utils/UnifyLoopExits.h"
+
+#include "llvm/Analysis/CallsiteInfo.h"
+#include "llvm/Transforms/Utils/MyFunction.h"
+#include "llvm/Transforms/Utils/MyPass.h"
+#include "llvm/Transforms/Utils/MyPass2.h"
+#include "llvm/Transforms/Utils/NewMod.h"
+#include "llvm/Transforms/Utils/ReadIn.h"
+#include "llvm/Transforms/Instrumentation/FunctionID.h"
+#include "llvm/Transforms/Utils/OnePassPI.h"
+
 #include "llvm/Transforms/Vectorize/LoadStoreVectorizer.h"
 #include "llvm/Transforms/Vectorize/LoopIdiomVectorize.h"
 #include "llvm/Transforms/Vectorize/LoopVectorize.h"
@@ -345,7 +355,11 @@ cl::opt<bool> PrintPipelinePasses(
     "print-pipeline-passes",
     cl::desc("Print a '-passes' compatible string describing the pipeline "
              "(best-effort only)."));
+
+cl::opt<std::string> OutFilePath("output-file", cl::init(""),
+    cl::desc("Path to the output file which record decision."), cl::value_desc("filename"));
 } // namespace llvm
+
 
 AnalysisKey NoOpModuleAnalysis::Key;
 AnalysisKey NoOpCGSCCAnalysis::Key;

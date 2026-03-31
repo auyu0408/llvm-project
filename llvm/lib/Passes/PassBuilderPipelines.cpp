@@ -144,7 +144,14 @@
 #include "llvm/Transforms/Vectorize/SLPVectorizer.h"
 #include "llvm/Transforms/Vectorize/VectorCombine.h"
 
+#include "llvm/Analysis/CallsiteInfo.h"
+#include "llvm/Transforms/Utils/OnePassPI.h"
+#include <cstdlib>
+
 using namespace llvm;
+
+static cl::opt<bool> EnableOnePI("enable-one-pi", cl::init(false),
+                                  cl::desc("Enable OnePassPI optimization"));
 
 static cl::opt<InliningAdvisorMode> UseInlineAdvisor(
     "enable-ml-inliner", cl::init(InliningAdvisorMode::Default), cl::Hidden,
@@ -223,6 +230,10 @@ static cl::opt<bool>
     EnableDFAJumpThreading("enable-dfa-jump-thread",
                            cl::desc("Enable DFA jump threading"),
                            cl::init(false), cl::Hidden);
+
+static cl::opt<bool> RecordCallsiteInfo("record-callsite-info", cl::init(false),
+    cl::desc("Enable callsite info")); //自己新增的
+    
 
 static cl::opt<bool>
     EnableHotColdSplit("hot-cold-split",
@@ -1253,8 +1264,6 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
 
   // Remove any dead arguments exposed by cleanups, constant folding globals,
   // and argument promotion.
-  MPM.addPass(DeadArgumentEliminationPass());
-
   if (Phase != ThinOrFullLTOPhase::ThinLTOPreLink)
     MPM.addPass(CoroCleanupPass());
 
@@ -1609,6 +1618,10 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
 
   ModulePassManager MPM;
 
+  // OnePassPI: 在 O0-level IR 上先跑自定義 pass，再進入 Oz pipeline
+  if (EnableOnePI)
+    MPM.addPass(OnePassPIPass());
+
   // Convert @llvm.global.annotations to !annotation metadata.
   MPM.addPass(Annotation2MetadataPass());
 
@@ -1708,6 +1721,7 @@ PassBuilder::buildThinLTOPreLinkDefaultPipeline(OptimizationLevel Level) {
   // phase that will run after the thin link, running this here ends up with
   // less information than will be available later and it may grow functions in
   // ways that aren't beneficial.
+
   if (RunPartialInlining)
     MPM.addPass(PartialInlinerPass());
 

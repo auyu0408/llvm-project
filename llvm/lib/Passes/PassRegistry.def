@@ -153,6 +153,12 @@ MODULE_PASS("tsan-module", ModuleThreadSanitizerPass())
 MODULE_PASS("verify", VerifierPass())
 MODULE_PASS("view-callgraph", CallGraphViewerPass())
 MODULE_PASS("wholeprogramdevirt", WholeProgramDevirtPass())
+
+MODULE_PASS("new-mod", NewModPass())
+MODULE_PASS("function-id", FunctionIDPass())
+MODULE_PASS("callsite-info", CallsiteInfoPass())
+MODULE_PASS("read-in", ReadInPass())
+MODULE_PASS("one-pi", OnePassPIPass())
 #undef MODULE_PASS
 
 #ifndef MODULE_PASS_WITH_PARAMS
@@ -492,6 +498,9 @@ FUNCTION_PASS("view-dom-only", DomOnlyViewer())
 FUNCTION_PASS("view-post-dom", PostDomViewer())
 FUNCTION_PASS("view-post-dom-only", PostDomOnlyViewer())
 FUNCTION_PASS("wasm-eh-prepare", WasmEHPreparePass())
+
+FUNCTION_PASS("my-pass", MyPass())
+FUNCTION_PASS("my-pass2", MyPass2())
 #undef FUNCTION_PASS
 
 #ifndef FUNCTION_PASS_WITH_PARAMS
