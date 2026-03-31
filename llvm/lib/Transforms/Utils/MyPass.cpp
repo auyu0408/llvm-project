@@ -66,7 +66,6 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
             std::reverse(SCC.begin(), SCC.end());
             for(auto Inst:SCC){
                 temp.push_back(Inst);
-                //errs() << "Inst: " << *Inst << "\n";
             }
             SCCs.push_back(temp);
         }
@@ -76,11 +75,8 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
     mappingNode(SCCs, alone);
 
     std::unordered_map<std::pair<Value *, Value *>, int, PairHash> cap = buildCapacity1(F);
-    //errs() << "finished build capacity.\n";
     // 建立可切割Graph
     InstGraph IG(To_Node, CFG, cap);
-    //errs() << "finished build InstGraph.\n";
-    //exportCFG(IG, F.getName()); // 印出Graph來看
     
     // Minimum Cut
     if(F.arg_empty()) return PreservedAnalyses::all();
@@ -91,7 +87,6 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
     Instruction *target = getLatestReturn(F, PDT);
 
     int maxFlow = fordFulkerson(IG, source, target, rfs);
-    //errs() << F.getName() << ", MaximumFlow: " << maxFlow << "\n"; 
     if(maxFlow != 0){
         std::vector<Instruction *> sepInsts;
         findMinCut(IG, rfs, sepInsts);

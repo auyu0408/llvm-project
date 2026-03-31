@@ -39,7 +39,6 @@ namespace llvm{
 
             if(!rec.count({u_V, v_V}) && u_num!=v_num){
                 capacity[{u_num, v_num}] += Cap[{u_V, v_V}];
-                //errs() << "Edge: " << *(u_V) << "->" << *(v_V) << "\n";
                 flow[{u_num, v_num}] = 0;
                 rec.insert({u_V, v_V});
             }
@@ -103,7 +102,6 @@ int fordFulkerson(InstGraph& G, Value* source, Value* target,
 
     int maxFlow = 0;
     while(true){
-        //errs() << "calculating: " << "\n";
         std::unordered_map<NodeNo, NodeNo> parent;
         std::queue<NodeNo> q;
         q.push(To_Node[source]);
@@ -125,16 +123,13 @@ int fordFulkerson(InstGraph& G, Value* source, Value* target,
         //如果找不到可以到target的路徑
         if(parent.find(To_Node[target]) == parent.end()) break;
 
-        //errs() << "step 2" << "\n";
         int pathFlow = INT_MAX;
         for(NodeNo v = To_Node[target]; v!= To_Node[source]; v = parent[v]){
             NodeNo u = parent[v];
             pathFlow = std::min(pathFlow, G.capacity[{u, v}] - G.flow[{u, v}]);
-            //errs() << pathFlow << "\n";
         }
 
         //update flow
-        //errs() << "step 3" << "\n";
         for(NodeNo v = To_Node[target]; v!= To_Node[source]; v = parent[v]){
             NodeNo u = parent[v];
             G.flow[{u, v}] += pathFlow;
@@ -150,7 +145,6 @@ int fordFulkerson(InstGraph& G, Value* source, Value* target,
 
     while(!q.empty()){
         NodeNo u = q.front();
-        //errs() << "reacheable:" << u << " " << "\n";
         q.pop();
 
         for(auto v:G.adjList[u]){
@@ -166,7 +160,6 @@ int fordFulkerson(InstGraph& G, Value* source, Value* target,
 }
 
 void findMinCut(InstGraph& G, const std::unordered_set<NodeNo> &reachableFromSource, std::vector<Instruction *> &sepInsts){
-    //errs() << "Minimum Cut edges:" << "\n";
 
     for(auto& [u,neighbors]:G.adjList){
         if(reachableFromSource.count(u)){
@@ -174,24 +167,13 @@ void findMinCut(InstGraph& G, const std::unordered_set<NodeNo> &reachableFromSou
                 if(!reachableFromSource.count(v) && G.capacity[{u, v}] > 0){
                     auto *u_v = To_Value[u].back();
                     auto *v_v = To_Value[v][0];
-                    //errs() << "get u, v Value\n";
                     if(u_v && dyn_cast<Instruction>(u_v)){
                         auto *u_I = dyn_cast<Instruction>(u_v);
                         sepInsts.push_back(u_I);
-                        /***
-                        errs() << "push u: ";
-                        u_I->dump();
-                        errs() << "\n";
-                        ***/
                     }
                     if(v_v && dyn_cast<Instruction>(v_v)){
                         auto *v_I = dyn_cast<Instruction>(v_v);
                         sepInsts.push_back(v_I);
-                        /***
-                        errs() << "push v: ";
-                        v_I->dump();
-                        errs() << "\n";
-                        ***/
                     }
                 }
             }
@@ -295,20 +277,11 @@ void mappingNode(std::vector<std::vector<Value *>> &SCCs, std::vector<std::vecto
     return;
 }
 
-bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM){
-    /***
-    errs() << "Function: " << F.getName() << "\n";
-    /***
-    for(auto &BB:F){
-        errs() << BB;
-    }
-    ***/
-     
+bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM){   
     // 1. get Function info
     Module *M = F.getParent();
     Instruction *cutI;
     if(sepInsts.size() < 2){
-        errs() << "No enough Instructions to split\n";
         return false;
     }
     else cutI = sepInsts[1];
@@ -317,12 +290,9 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
         cutI = cutI -> getNextNode(); // PHI node 不能被切割，所以要往後找
     }
     if(sepInsts[0]->isTerminator()){
-        errs() << "Cut Instruction is Terminator\n";
         return false;
     }
-    //errs() << "check ret\n";
     if(isa<ReturnInst>(sepInsts[0])||(sepInsts.size() > 1 && isa<ReturnInst>(sepInsts[1]))){
-        errs() << "We don't need to split return instruction\n";
         return false;
     }
 
@@ -330,31 +300,19 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
     BasicBlock *newCutBB = cutBB->splitBasicBlock(cutI, cutBB->getName() + ".split"); // build new BB
     Instruction *splitP = cutBB->getTerminator(); // 抓住cutI前一個指令作為 split 點，負責 call function 和 安插新 return
 
-    /***
-    errs() << "Cut Instruction: ";
-    //cutI->dump();
-    /***
-    errs() << "\nAfter split\n";
-    errs() << "Cut BB: " << *cutBB << "\n";
-    errs() << "New Cut BB: " << *newCutBB << "\n";
-    ***/
-
     // 2. 蒐集要移出去的 BB
     std::vector<BasicBlock *> BlocksToMove;
     std::queue<BasicBlock *> BBQueue;
     std::vector<PHINode *> PHIs; // 用來檢查是否有 PHI node
-    //bool PHIfound = false;
     
     BlocksToMove.push_back(newCutBB);
     BBQueue.push(newCutBB);
     while(BBQueue.size() > 0){
         BasicBlock *BB = BBQueue.front();
         BBQueue.pop();
-        //errs() << "BB: " << *BB << "\n";
         for (BasicBlock *Succ : successors(BB)) {
             for(auto &I: *Succ){
                 if(isa<PHINode>(I)){
-                    //PHIfound = true;
                     PHIs.push_back(dyn_cast<PHINode>(&I));
                 }
             }
@@ -366,7 +324,6 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
     }
 
     if(!PHIs.empty()){
-        //errs() << "No PHI split, merge\n";
         MergeBlockIntoPredecessor(newCutBB);
         return false;
     }
@@ -385,7 +342,6 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
 
     ///***
     if(entryBlocks.size() > 1){
-        //errs() << "Skip Branch, merge\n";
         MergeBlockIntoPredecessor(newCutBB);
         return false;
     }
@@ -403,7 +359,6 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
             for(auto &I:BB){
                 for(Use &U:I.uses()){
                     if(Instruction *useInst = dyn_cast<Instruction>(U.getUser())){
-                        //useInst->dump();
                         BasicBlock *useB = useInst->getParent();
                         if(std::find(BlocksToMove.begin(), BlocksToMove.end(), useB) != BlocksToMove.end()){
                             unsigned opIdx = U.getOperandNo();
@@ -429,7 +384,6 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
     }
 
     if(LiveOuts.empty()){
-        //errs() << "No LiveOuts found, nothing to split, merge\n";
         MergeBlockIntoPredecessor(newCutBB);
         return false;
     }
@@ -463,12 +417,9 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
     ValueToValueMapTy VMap;
     unsigned argCount = 0;
     auto argIt = newFunc->arg_begin();
-    //Value *select_val = nullptr;
     for(Value *V : LiveOuts){
         Value *arg = &*argIt++;
-        //errs() << V->getName()  << "\n";
-        arg->setName("arg" + std::to_string(argCount++) + ".moved"); // 
-        //errs() << "New Argument: " << arg->getName() << "\n";
+        arg->setName("arg" + std::to_string(argCount++) + ".moved");
         VMap[V] = arg;
     }
 
@@ -476,7 +427,6 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
     // 不能直接用 replaceAllUsesWith()，會有風險（可能一部分被 split point 的 front 用，一部分被 back 用）
     for(auto &BB : BlocksToMove){
         for(auto &I : *BB){
-            //errs() << "I: " << I << "\n";
             for(unsigned i = 0; i < I.getNumOperands(); i++){
                 Value *Op = I.getOperand(i);
                 if(VMap.count(Op)){
@@ -513,10 +463,7 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
     }  
     splitP->eraseFromParent(); // 刪除原本的指令
     newFunc->addFnAttr(Attribute::NoInline);
-    //errs() << "Function: " << F.getName() << " split to " << newFunc->getName() << "\n";
 
-    //auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
-    //errs() << "Verify\n";
     bool broken = verifyFunction(*newFunc, &errs());
     if(broken){
         errs() << "Function Verified failed.\n";
