@@ -31,6 +31,14 @@ add_llvm_component_library(LLVMTransformUtils
   FunctionImportUtils.cpp
   GlobalStatus.cpp
   GuardUtils.cpp
+
+  MyFunction.cpp
+  MyPass.cpp
+  MyPass2.cpp
+  NewMod.cpp
+  ReadIn.cpp
+  OnePassPI.cpp
+
   HelloWorld.cpp
   InlineFunction.cpp
   InjectTLIMappings.cpp
@@ -91,12 +99,15 @@ add_llvm_component_library(LLVMTransformUtils
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms/Utils
-
+  
   DEPENDS
   intrinsics_gen
 
   LINK_COMPONENTS
   Analysis
+  
+  BitWriter
+
   Core
   Support
   TargetParser
