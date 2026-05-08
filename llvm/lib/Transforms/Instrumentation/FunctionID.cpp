@@ -1,11 +1,10 @@
 #include "llvm/Transforms/Instrumentation/FunctionID.h"
 
-#include "llvm/IR/CFG.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PassManager.h"
-
+#include "llvm/IR/CFG.h"
 #include <set>
 #include <map>
 
@@ -15,6 +14,7 @@ PreservedAnalyses FunctionIDPass::run(Module &M, ModuleAnalysisManager &AM) {
   size_t CallBaseID = 1;
   std::map<Function*, std::vector<Function*>> Callees;
   std::map<Function*, int> Indegrees;
+  
   std::map<BasicBlock*, std::vector<CallBase*>> CBs;
   std::vector<Function*> SortedFuncs;
   for (auto &F : M) {
@@ -26,9 +26,7 @@ PreservedAnalyses FunctionIDPass::run(Module &M, ModuleAnalysisManager &AM) {
         // overwrite original callbase id
         auto &Ctx = M.getContext();
         auto *N = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(
-                                      Ctx, APInt{64, 0, false}))); 
-              // MDNode: metadata node(Context/MDs)
-              // ConstantInt::get: 建立常數整數，APInt(位元數/值/isSigned)
+                                      Ctx, APInt{64, 0, false})));
         CB->setMetadata("callbase.id", N);
         // steal from computeFunctionSummary
         auto *CalledValue = CB->getCalledOperand();
@@ -55,33 +53,41 @@ PreservedAnalyses FunctionIDPass::run(Module &M, ModuleAnalysisManager &AM) {
     }
   }
 
-  // topological sort on functions
+  // topological sort on functions (using M iteration for determinism)
   std::set<Function*> CallerConsidered;
   while (!Indegrees.empty()) {
     std::vector<Function*> ZeroIndeegrees;
     std::vector<Function*> FallbackCandidates;
-    for (auto &pair : Indegrees) {
-      if (pair.second == 0)
-        ZeroIndeegrees.push_back(pair.first);
-      else if (CallerConsidered.count(pair.first))
-        FallbackCandidates.push_back(pair.first);
+    
+    // Iterate deterministically using Module M
+    for (auto &F : M) {
+      if (!Indegrees.count(&F)) continue;
+      if (Indegrees[&F] == 0)
+        ZeroIndeegrees.push_back(&F);
+      else if (CallerConsidered.count(&F))
+        FallbackCandidates.push_back(&F);
     }
+    
     if (ZeroIndeegrees.size() == 0) {
       for (auto Func : FallbackCandidates)
         ZeroIndeegrees.push_back(Func);
     }
+    
     if (ZeroIndeegrees.size() == 0) {
       int MinIndegree = 100000;
+      // Deterministic tie breaker for MinIndegree
       Function* Chosen = nullptr;
-      for (auto &pair : Indegrees) {
-        if (pair.second < MinIndegree) {
-          MinIndegree = pair.second;
-          Chosen = pair.first;
+      for (auto &F : M) {
+        if (!Indegrees.count(&F)) continue;
+        if (Indegrees[&F] < MinIndegree) {
+          MinIndegree = Indegrees[&F];
+          Chosen = &F;
         }
       }
       if (Chosen)
         ZeroIndeegrees.push_back(Chosen);
     }
+    
     assert(ZeroIndeegrees.size() > 0 && "Should find a function!");
     for (auto Func : ZeroIndeegrees) {
       Indegrees.erase(Func);
@@ -110,37 +116,41 @@ PreservedAnalyses FunctionIDPass::run(Module &M, ModuleAnalysisManager &AM) {
     while (!Indegrees.empty()) {
       std::vector<BasicBlock*> ZeroIndeegrees;
       std::vector<BasicBlock*> FallbackCandidates;
-      for (auto &pair : Indegrees) {
-        if (pair.second == 0)
-          ZeroIndeegrees.push_back(pair.first);
-        else if (PredecessorConsidered.count(pair.first))
-          FallbackCandidates.push_back(pair.first);
+      
+      // Iterate deterministically using Func
+      for (auto &BB : *Func) {
+        if (!Indegrees.count(&BB)) continue;
+        if (Indegrees[&BB] == 0)
+          ZeroIndeegrees.push_back(&BB);
+        else if (PredecessorConsidered.count(&BB))
+          FallbackCandidates.push_back(&BB);
       }
+      
       if (ZeroIndeegrees.size() == 0) {
         for (auto BB : FallbackCandidates)
           ZeroIndeegrees.push_back(BB);
       }
+      
+      if (ZeroIndeegrees.size() == 0) {
+        // Fallback robust breaker
+        for (auto &BB : *Func) {
+          if (Indegrees.count(&BB)) {
+            ZeroIndeegrees.push_back(&BB);
+            break;
+          }
+        }
+      }
+      
       assert(ZeroIndeegrees.size() > 0 && "Should find a basic block!");
       for (auto BB : ZeroIndeegrees) {
         Indegrees.erase(BB);
         if (CBs.count(BB)) {
           // modify callbase id (start from 1)
           for (auto CB : CBs[BB]) {
-            if(!CB) continue;
-            auto *Callee = CB->getCalledFunction();
-            auto *Caller = CB->getCaller();
             auto &Ctx = M.getContext();
             auto *N = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(
                                            Ctx, APInt{64, CallBaseID++, false})));
-            if(Callee && (Callee->getName().ends_with("cloned") || Callee->hasFnAttribute("hello-inline"))){
-              CB->setMetadata("callbase.id", NULL); // already cloned function, do not process again
-            }
-            else if(Caller && (Caller->getName().ends_with("cloned") || Caller->hasFnAttribute("hello-inline"))){
-              CB->setMetadata("callbase.id", NULL);
-            }
-            else{
-              CB->setMetadata("callbase.id", N);
-            }
+            CB->setMetadata("callbase.id", N);
           }
         }
         for (auto Succ : successors(BB)) {

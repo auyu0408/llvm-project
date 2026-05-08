@@ -96,6 +96,34 @@ void setPassVal(CallBase *CB, bool val) {
     CB->setMetadata("goPass", N);
 }
 
+bool hasPartialInlineVal(const CallBase *CB) {
+    auto *N = CB->getMetadata("goPartialInline");
+    if(!N) return false;
+    if(!dyn_cast<MDNode>(N)) return false;
+    if(!dyn_cast<ConstantAsMetadata>(dyn_cast<MDNode>(N)->getOperand(0))) return false;
+
+    auto *CM = dyn_cast<ConstantAsMetadata>(dyn_cast<MDNode>(N)->getOperand(0));
+    if(!CM) return false;
+    if(!dyn_cast<ConstantInt>(CM->getValue())) return false;
+
+    return true;
+}
+
+bool getPartialInlineVal(const CallBase *CB) {
+    auto *N = CB->getMetadata("goPartialInline");
+    assert(N && "CallBase does not carry goPartialInline metadata.\n");
+    Constant *C = dyn_cast<ConstantAsMetadata>(dyn_cast<MDNode>(N)->getOperand(0))
+                        ->getValue();
+    return cast<ConstantInt>(C)->isOne();
+}
+
+void setPartialInlineVal(CallBase *CB, bool val) {
+    auto &Ctx = CB->getContext();
+    ConstantInt *CI = ConstantInt::get(Type::getInt1Ty(Ctx), val ? 1 : 0);
+    MDNode *N = MDNode::get(Ctx, {ConstantAsMetadata::get(CI)});
+    CB->setMetadata("goPartialInline", N);
+}
+
 int fordFulkerson(InstGraph& G, Value* source, Value* target,
                     std::unordered_set<NodeNo>& reachableFromSource){ //target = sink
     if(source == nullptr || target == nullptr) return 0;

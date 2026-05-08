@@ -120,6 +120,9 @@ extern cl::opt<std::string> InputFilePath;
 bool hasPassVal(const CallBase *CB);
 bool getPassVal(const CallBase *CB);
 void setPassVal(CallBase *CB, bool val);
+bool hasPartialInlineVal(const CallBase *CB);
+bool getPartialInlineVal(const CallBase *CB);
+void setPartialInlineVal(CallBase *CB, bool val);
 size_t getCallBaseId(const CallBase *CB);
 bool hasCallBaseId(const CallBase *CB);
 int fordFulkerson(InstGraph& G, Value* source, Value* target,

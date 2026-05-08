@@ -19,8 +19,8 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
             if(!Caller) continue;
             if(Callee->isIntrinsic()) continue;
             if(Callee->hasInternalLinkage()||Callee->isDSOLocal()){
-                if(!hasPassVal(CB)) continue;
-                auto res = getPassVal(CB);
+                if(!hasPartialInlineVal(CB)) continue;
+                auto res = getPartialInlineVal(CB);
                 if((Callee == &F) && res){
                     inlined_flag = 1;
                     break;
@@ -102,8 +102,8 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
                     if(!Caller) continue;
                     if(Callee->isIntrinsic()) continue;
                     if(Callee->hasInternalLinkage()||Callee->isDSOLocal()){
-                        if(!hasPassVal(CB)) continue;
-                        auto res =  getPassVal(CB);
+                        if(!hasPartialInlineVal(CB)) continue;
+                        auto res =  getPartialInlineVal(CB);
                         if((Callee == &F) && res){
                             InlineFunctionInfo IFI;
                             InlineFunction(*CI, IFI);//這邊會用到CI，前面是用到CB所以兩個都要

@@ -19,7 +19,7 @@ PreservedAnalyses ReadInPass::run(Module &M, ModuleAnalysisManager &AM) {
                     continue;
                 // build MDNode, 要不要partial inline的初始值選不要
                 auto &Ctx = M.getContext();
-                unsigned MyMetaID = Ctx.getMDKindID("goPass");
+                unsigned MyMetaID = Ctx.getMDKindID("goPartialInline");
                 auto *N = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::getBool(
                                     Ctx, false)));// 常數bool
 
@@ -98,7 +98,7 @@ PreservedAnalyses ReadInPass::run(Module &M, ModuleAnalysisManager &AM) {
             NewMD = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(Type::getInt1Ty(
                                       Ctx), 1)));
         }
-        CB->setMetadata("goPass", NewMD);
+        CB->setMetadata("goPartialInline", NewMD);
     }
 
     return PreservedAnalyses::all();
