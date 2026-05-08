@@ -1,26 +1,15 @@
 #pragma once
 
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/Transforms/Utils/MyFunction.h"
-
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/InstrTypes.h"
-#include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
-
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Path.h" 
-#include "llvm/Support/raw_ostream.h"
-
-using namespace llvm;
+#include "llvm/IR/InstrTypes.h"
 
 namespace llvm {
-  extern cl::opt<std::string> OutFilePath;
 
-  class CallsiteInfoPass : public PassInfoMixin<CallsiteInfoPass> {
-    public:
-      PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
-    };
+class CallsiteInfoPass : public PassInfoMixin<CallsiteInfoPass> {
+public:
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+  size_t getCallBaseId(const CallBase &CB);
+  bool hasCallBaseId(const CallBase &CB);
+};
+
 } // namespace llvm

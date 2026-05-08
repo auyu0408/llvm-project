@@ -329,6 +329,10 @@
 #include "llvm/Transforms/Utils/UnifyLoopExits.h"
 
 #include "llvm/Analysis/CallsiteInfo.h"
+#include "llvm/Analysis/GeneralFunctionInfo.h"
+#include "llvm/Analysis/LocalFunctionInfo.h"
+#include "llvm/Analysis/RecordAvailableExternallyFunciton.h"
+
 #include "llvm/Transforms/Utils/MyFunction.h"
 #include "llvm/Transforms/Utils/MyPass.h"
 #include "llvm/Transforms/Utils/MyPass2.h"

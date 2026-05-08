@@ -66,6 +66,10 @@ add_llvm_component_library(LLVMAnalysis
   DXILResource.cpp
   DXILMetadataAnalysis.cpp
   FunctionPropertiesAnalysis.cpp
+
+  GeneralFunctionInfo.cpp
+  LocalFunctionInfo.cpp
+
   GlobalsModRef.cpp
   GuardUtils.cpp
   HeatUtils.cpp
@@ -121,6 +125,9 @@ add_llvm_component_library(LLVMAnalysis
   PostDominators.cpp
   ProfileSummaryInfo.cpp
   PtrUseVisitor.cpp
+
+  RecordAvailableExternallyFunciton.cpp
+
   RegionInfo.cpp
   RegionPass.cpp
   RegionPrinter.cpp

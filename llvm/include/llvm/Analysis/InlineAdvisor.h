@@ -13,7 +13,10 @@
 #include "llvm/Analysis/InlineCost.h"
 #include "llvm/Analysis/LazyCallGraph.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Support/raw_ostream.h"
 #include <memory>
+#include <sstream>
+#include <unordered_map>
 
 namespace llvm {
 class BasicBlock;
@@ -144,19 +147,27 @@ class DefaultInlineAdvice : public InlineAdvice {
 public:
   DefaultInlineAdvice(InlineAdvisor *Advisor, CallBase &CB,
                       std::optional<InlineCost> OIC,
-                      OptimizationRemarkEmitter &ORE, bool EmitRemarks = true)
-      : InlineAdvice(Advisor, CB, ORE, OIC.has_value()), OriginalCB(&CB),
-        OIC(OIC), EmitRemarks(EmitRemarks) {}
+                      OptimizationRemarkEmitter &ORE,
+                      bool EmitRemarks = true,
+                      raw_string_ostream *RecordStream = nullptr,
+                      raw_string_ostream *RecordCallsiteTypeStream = nullptr,
+                      raw_string_ostream *RecordStaticFunctionStream = nullptr);
 
 private:
   void recordUnsuccessfulInliningImpl(const InlineResult &Result) override;
   void recordInliningWithCalleeDeletedImpl() override;
   void recordInliningImpl() override;
+  void recordUnattemptedInliningImpl() override;
 
 private:
   CallBase *const OriginalCB;
   std::optional<InlineCost> OIC;
   bool EmitRemarks;
+  size_t ID;
+  raw_string_ostream *RecordStream;
+  raw_string_ostream *RecordCallsiteTypeStream;   // [LittleLaGi]
+  raw_string_ostream *RecordStaticFunctionStream;  // [LittleLaGi]
+  std::string callsite_type;                       // [LittleLaGi]
 };
 
 /// Interface for deciding whether to inline a call site or not.
@@ -211,6 +222,19 @@ protected:
   const std::string AnnotatedInlinePassName;
   std::unique_ptr<ImportedFunctionsInliningStatistics> ImportedFunctionsStats;
 
+  // [LittleLaGi] Record/replay infrastructure
+  std::string RecordFile;
+  std::string RecordString;
+  raw_string_ostream RecordStream{RecordString};
+  std::string RecordCallsiteTypeFile;
+  std::string RecordCallsiteTypeString;
+  raw_string_ostream RecordCallsiteTypeStream{RecordCallsiteTypeString};
+  std::string RecordStaticFunctionFile;
+  std::string RecordStaticFunctionString;
+  raw_string_ostream RecordStaticFunctionStream{RecordStaticFunctionString};
+  std::unordered_map<size_t, bool> FixedDecisions;
+  void loadFixedDecisions(const char *FName);
+
   enum class MandatoryInliningKind { NotMandatory, Always, Never };
 
   static MandatoryInliningKind getMandatoryKind(CallBase &CB,
@@ -230,7 +254,17 @@ class DefaultInlineAdvisor : public InlineAdvisor {
 public:
   DefaultInlineAdvisor(Module &M, FunctionAnalysisManager &FAM,
                        InlineParams Params, InlineContext IC)
-      : InlineAdvisor(M, FAM, IC), Params(Params) {}
+      : InlineAdvisor(M, FAM, IC), Params(Params) {
+    if (const char *RecordFileName = std::getenv("RECORD_INLINE"))
+      RecordFile = RecordFileName;
+    if (const char *RecordCallsiteTypeFileName = std::getenv("RECORD_CALLSITE_TYPE"))
+      RecordCallsiteTypeFile = RecordCallsiteTypeFileName;
+    if (const char *RecordStaticFunctionFileName = std::getenv("RECORD_STATIC_FUNCTIONS"))
+      RecordStaticFunctionFile = RecordStaticFunctionFileName;
+    if (const char *FixedDecisionsFileName = std::getenv("FIXED_INLINE_RECORD"))
+      loadFixedDecisions(FixedDecisionsFileName);
+  }
+  ~DefaultInlineAdvisor() override;
 
 private:
   std::unique_ptr<InlineAdvice> getAdviceImpl(CallBase &CB) override;

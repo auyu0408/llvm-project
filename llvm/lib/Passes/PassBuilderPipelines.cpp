@@ -145,13 +145,17 @@
 #include "llvm/Transforms/Vectorize/VectorCombine.h"
 
 #include "llvm/Analysis/CallsiteInfo.h"
+#include "llvm/Analysis/GeneralFunctionInfo.h"
+#include "llvm/Analysis/LocalFunctionInfo.h"
+#include "llvm/Analysis/RecordAvailableExternallyFunciton.h"
 #include "llvm/Transforms/Utils/OnePassPI.h"
+#include "llvm/Transforms/Instrumentation/FunctionID.h"
 #include <cstdlib>
 
 using namespace llvm;
 
-static cl::opt<bool> EnableOnePI("enable-one-pi", cl::init(false),
-                                  cl::desc("Enable OnePassPI optimization"));
+static cl::opt<bool> RunMyCustomPartialInlining("run-custom-pi", cl::init(false), cl::Hidden,
+                                  cl::desc("Run custom Partial inlinining pass"));
 
 static cl::opt<InliningAdvisorMode> UseInlineAdvisor(
     "enable-ml-inliner", cl::init(InliningAdvisorMode::Default), cl::Hidden,
@@ -931,6 +935,9 @@ PassBuilder::buildInlinerPipeline(OptimizationLevel Level,
                                 InlineContext{Phase, InlinePass::CGSCCInliner},
                                 UseInlineAdvisor, MaxDevirtIterations);
 
+  if (std::getenv("RECORD_LOCAL_FUNCTIONS"))
+    return MIWP;
+
   // Require the GlobalsAA analysis for the module so we can query it within
   // the CGSCC pipeline.
   if (EnableGlobalAnalyses) {
@@ -1257,6 +1264,18 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
 
   MPM.addPass(AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/true));
 
+  if (std::getenv("RECORD_GENERAL_FUNCTIONS")) {
+    MPM.addPass(GeneralFunctionInfoPass());
+    return MPM;
+  }
+  if (std::getenv("RECORD_CALLSITE_INFO")) {
+    MPM.addPass(CallsiteInfoPass());
+    return MPM;
+  }
+
+  if (std::getenv("RECORD_LOCAL_FUNCTIONS"))
+    MPM.addPass(LocalFunctionInfoPass());
+
   if (EnableModuleInliner)
     MPM.addPass(buildModuleInlinerPipeline(Level, Phase));
   else
@@ -1422,6 +1441,16 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
                                              ThinOrFullLTOPhase LTOPhase) {
   const bool LTOPreLink = isLTOPreLink(LTOPhase);
   ModulePassManager MPM;
+
+  // Add my pass
+  if (RunMyCustomPartialInlining) {
+    // 1. my split pass
+    MPM.addPass(OnePassPIPass());
+    
+    // 2. simple optimization pipeline
+    MPM.addPass(createModuleToFunctionPassAdaptor(
+        buildFunctionSimplificationPipeline(Level, LTOPhase)));
+  }
 
   // Run partial inlining pass to partially inline functions that have
   // large bodies.
@@ -1617,11 +1646,7 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
     return buildO0DefaultPipeline(Level, Phase);
 
   ModulePassManager MPM;
-
-  // OnePassPI: 在 O0-level IR 上先跑自定義 pass，再進入 Oz pipeline
-  if (EnableOnePI)
-    MPM.addPass(OnePassPIPass());
-
+  
   // Convert @llvm.global.annotations to !annotation metadata.
   MPM.addPass(Annotation2MetadataPass());
 

@@ -159,6 +159,8 @@ MODULE_PASS("function-id", FunctionIDPass())
 MODULE_PASS("callsite-info", CallsiteInfoPass())
 MODULE_PASS("read-in", ReadInPass())
 MODULE_PASS("one-pi", OnePassPIPass())
+MODULE_PASS("local-function-info", LocalFunctionInfoPass())
+MODULE_PASS("record-available-externally-functions", RecordAvailableExternallyFuncitonPass())
 #undef MODULE_PASS
 
 #ifndef MODULE_PASS_WITH_PARAMS
