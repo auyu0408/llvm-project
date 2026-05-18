@@ -142,9 +142,12 @@ size_t llvm::estimateTextSize(Module &M) {
     return textSize;
 }
 
-/// Helper: 為一個獨立的 Module 建立完整的 analysis manager 並跑 Oz 的 simplification pipeline，
+/// Helper: 為一個獨立的 Module 建立完整的 analysis manager 並跑完整 Oz pipeline，
 /// 回傳 estimated text size。
-static size_t simpleOpt(Module &M) {
+/// buildPerModuleDefaultPipeline 會經過 buildModuleOptimizationPipeline，
+/// 其中因為 cl::opt RunMyCustomPartialInlining 為 true 會再次加入 OnePassPIPass，
+/// 但 InsideOnePassPI guard 會讓遞迴呼叫直接返回。
+static size_t ModuleOpt(Module &M) {
     // 每個 cloned module 需要自己的一整套 analysis managers
     LoopAnalysisManager   LAM;
     FunctionAnalysisManager FAM;
@@ -158,28 +161,27 @@ static size_t simpleOpt(Module &M) {
     PB.registerLoopAnalyses(LAM);
     PB.crossRegisterProxies(LAM, FAM, CGAM, MAM_local);
 
-    ModulePassManager MPM;
-    MPM.addPass(createModuleToFunctionPassAdaptor(
-        PB.buildFunctionSimplificationPipeline(OptimizationLevel::Oz,
-                                               ThinOrFullLTOPhase::None)));
+    // 跑完剩下的 Oz pipeline
+    ModulePassManager MPM =
+        PB.buildModuleOptimizationPipeline(OptimizationLevel::Oz, ThinOrFullLTOPhase::None);
     MPM.run(M, MAM_local);
 
     return estimateTextSize(M);
 }
 
-// Guard: 防止可能的遞迴呼叫（目前已改用 FunctionSimplificationPipeline
-// 不會再觸發 OnePassPIPass，但保留此 guard 以防萬一）
+// Guard: 防止遞迴呼叫。fullOpt 會經過 buildModuleOptimizationPipeline
+// 會因 cl::opt RunMyCustomPartialInlining 為 true 而再次加入 OnePassPIPass
+// 此 guard 確保遞迴呼叫直接返回。
 static bool InsideOnePassPI = false;
 
 PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
-    // Re-entrance guard: 如果已經在 OnePassPI 內部（例如 simpleOpt
-    // 建的 pipeline 又包含了這個 pass），直接跳過
+    // Re-entrance guard
     if (InsideOnePassPI)
         return PreservedAnalyses::all();
     InsideOnePassPI = true;
 
     // 1. 讀檔案
-    // 若是沒有給檔案名的話，預設檔案名為 xxx.c -> xxx_c.decisions（放在當前目錄）
+    // 預設檔案名為 xxx.c -> xxx_c.partial.decision（當前目錄）
     if (InputFilePath.empty()) {
         StringRef SrcFile = M.getSourceFileName();
         std::string BaseName = sys::path::filename(SrcFile).str();
@@ -193,9 +195,10 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
     MyRead.run(M, MAM);
 
     {
-        // 2. baseline: clone → Oz → 量 size
+        // 2. baseline: clone → 完整 Oz → 量 size
+        // MyPass() 在沒有任何 goPartialInline=true 的 call site 時會直接 return PreservedAnalyses::all()，不做任何 CFG 改動，
         std::unique_ptr<Module> M_baseline = CloneModule(M);
-        size_t sizeBaseline = simpleOpt(*M_baseline); // 如果需要的話可以分成在clang內或是單獨跑這個pass
+        size_t sizeBaseline = ModuleOpt(*M_baseline);
 
         // 3. 收集所有 candidate call sites（有 callbase.id 且 goPartialInline == false）
         struct Candidate {
@@ -266,7 +269,7 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
             }
             if (!found) continue;
 
-            // (c) 在 cloned module 上跑 MyPass + Oz
+            // (c) 在 cloned module 上跑 MyPass + 完整 Oz pipeline
             {
                 LoopAnalysisManager   LAM_c;
                 FunctionAnalysisManager FAM_c;
@@ -280,15 +283,20 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                 PB_c.registerLoopAnalyses(LAM_c);
                 PB_c.crossRegisterProxies(LAM_c, FAM_c, CGAM_c, MAM_c);
 
+                // 先做 function splitting
                 FunctionPassManager MyFPM;
                 MyFPM.addPass(MyPass());
                 MyFPM.run(*F_callee, FAM_c);
 
-                ModulePassManager SimplifyMPM;
-                SimplifyMPM.addPass(createModuleToFunctionPassAdaptor(
+                ModulePassManager SimplifyM_PM;
+                SimplifyM_PM.addPass(createModuleToFunctionPassAdaptor(
                     PB_c.buildFunctionSimplificationPipeline(
                         OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
-                SimplifyMPM.run(*M_comp, MAM_c);
+                SimplifyM_PM.run(*M_comp, MAM_c);   
+
+                // 再跑剩下的 Oz pipeline（InsideOnePassPI guard 會阻止遞迴）
+                ModulePassManager OptMPM = PB_c.buildModuleOptimizationPipeline(OptimizationLevel::Oz,ThinOrFullLTOPhase::None);
+                OptMPM.run(*M_comp, MAM_c);
             }
 
             // (d) 量 size，跟 baseline 比較
@@ -346,7 +354,8 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
         std::signal(SIGTERM, PrevSIGTERM);
     }
 
-    // (f) 寫入 partial inline 決策檔
+    // (f) 寫入決策檔
+    bool anyChange = false; // 標記是否真的有 partial inline 發生
     if (const char *RecordFileName = std::getenv("RECORD_PARTIAL_INLINE")) {
         std::string RecordStr;
         raw_string_ostream RecordOS(RecordStr);
@@ -365,6 +374,7 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                              << Callee->getName() << ','
                              << id << ','
                              << (pi ? "inlined" : "not_inlined") << '\n';
+                    if(pi) anyChange = true;
                 }
             }
         }
@@ -378,7 +388,7 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
         errs() << "Finished writing partial inline decisions\n";
     }
 
-    // (f) split 原本 module、後續opt
+    // (g) split
     ModulePassManager MySplit;
     FunctionPassManager MyFPM;
     MyFPM.addPass(MyPass());
@@ -386,20 +396,34 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
     MySplit.run(M, MAM);
 
     InsideOnePassPI = false;
-    return PreservedAnalyses::none();
+    // 執行function simplification
+    if (anyChange){
+        LoopAnalysisManager   LAM_cu;
+        FunctionAnalysisManager FAM_cu;
+        CGSCCAnalysisManager  CGAM_cu;
+        ModuleAnalysisManager MAM_cu;
+        PassBuilder PB_cu;
+        PB_cu.registerModuleAnalyses(MAM_cu);
+        PB_cu.registerCGSCCAnalyses(CGAM_cu);
+        PB_cu.registerFunctionAnalyses(FAM_cu);
+        PB_cu.registerLoopAnalyses(LAM_cu);
+        PB_cu.crossRegisterProxies(LAM_cu, FAM_cu, CGAM_cu, MAM_cu);
+
+        ModulePassManager CleanUpMPM;
+        CleanUpMPM.addPass(createModuleToFunctionPassAdaptor(
+            PB_cu.buildFunctionSimplificationPipeline(
+                OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
+        CleanUpMPM.run(M, MAM_cu);
+
+        return PreservedAnalyses::none();
+    }
+
+    return PreservedAnalyses::all(); // 沒有任何 split 發生，回傳 all() 避免不必要的 analysis 失效
 
 }
 
 
 void registerMyPass(PassBuilder &PB) {
-    // 1. 註冊一個分析 Pass (如果 OnePassPI 需要 FunctionIDPass 的結果)
-    /*** 寫過了
-    PB.registerAnalysisRegistrationCallback([](ModuleAnalysisManager &MAM) {
-        MAM.registerPass([&] { return FunctionIDPass(); });
-    });
-    ***/
-
-    // 2. 將主 Pass 掛載到管線中 (例如：在優化管線開始時執行)
     PB.registerPipelineStartEPCallback(
         [](ModulePassManager &MPM, OptimizationLevel Level) {
             MPM.addPass(llvm::OnePassPIPass());

@@ -26,7 +26,7 @@ PreservedAnalyses ReadInPass::run(Module &M, ModuleAnalysisManager &AM) {
                 // get Function/callbase
                 CB->setMetadata(MyMetaID, N);
 
-                //不需要紀錄間接函數調用，還有指標函數等，在給FunctionID的時候有做一樣的事情（但怕改壞原本的程式所以沒有放在同個Pass裡面）
+                //不需要紀錄間接函數調用，還有指標函數等
                 auto *CalledValue = CB -> getCalledOperand();
                 auto *CalledFunction = CB -> getCalledFunction();
                 if(CalledValue && !CalledFunction){

@@ -1444,12 +1444,9 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
 
   // Add my pass
   if (RunMyCustomPartialInlining) {
-    // 1. my split pass
     MPM.addPass(OnePassPIPass());
-    
-    // 2. simple optimization pipeline
-    MPM.addPass(createModuleToFunctionPassAdaptor(
-        buildFunctionSimplificationPipeline(Level, LTOPhase)));
+    // 不在這裡加 buildFunctionSimplificationPipeline，
+    // 在OnePass內有需要（partial inline）的話執行。
   }
 
   // Run partial inlining pass to partially inline functions that have
