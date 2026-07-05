@@ -1,5 +1,7 @@
 #include "llvm/Transforms/Utils/OnePassPI.h"
 #include "llvm/Transforms/Utils/MyFunction.h"
+#include "llvm/Transforms/IPO/SCCP.h"
+#include "llvm/Transforms/IPO/DeadArgumentElimination.h"
 
 #include <csignal>
 #include <cstdlib>
@@ -290,6 +292,9 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
 
                 // Simplification → Optimization
                 ModulePassManager MPM_c;
+                MPM_c.addPass(IPSCCPPass());
+                MPM_c.addPass(DeadArgumentEliminationPass());
+
                 MPM_c.addPass(createModuleToFunctionPassAdaptor(
                     PB_c.buildFunctionSimplificationPipeline(
                         OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
@@ -421,6 +426,9 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
         PB_cu.crossRegisterProxies(LAM_cu, FAM_cu, CGAM_cu, MAM_cu);
 
         ModulePassManager CleanUpMPM;
+        CleanUpMPM.addPass(IPSCCPPass());
+        CleanUpMPM.addPass(DeadArgumentEliminationPass());
+
         CleanUpMPM.addPass(createModuleToFunctionPassAdaptor(
             PB_cu.buildFunctionSimplificationPipeline(
                 OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
