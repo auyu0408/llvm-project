@@ -36,4 +36,4 @@ namespace llvm{
     };
 }//namespace llvm
 
-std::unordered_map<std::pair<Value *, Value *>, int, PairHash> buildCapacity1(Function &F);
+std::unordered_map<std::pair<Value *, Value *>, int, PairHash> buildCapacity(Function &F);

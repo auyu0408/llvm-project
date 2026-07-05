@@ -306,13 +306,11 @@ void mappingNode(std::vector<std::vector<Value *>> &SCCs, std::vector<std::vecto
 }
 
 bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM){   
-    // 1. get Function info
-    Module *M = F.getParent();
-    Instruction *cutI;
+    // 1. 基本檢查
     if(sepInsts.size() < 2){
         return false;
     }
-    else cutI = sepInsts[1];
+    Instruction *cutI = sepInsts[1];
     
     if(isa<PHINode>(cutI)){
         cutI = cutI -> getNextNode(); // PHI node 不能被切割，所以要往後找
@@ -324,173 +322,50 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
         return false;
     }
 
+    // 2. 在切割點把 BasicBlock 切開
     BasicBlock *cutBB = cutI->getParent();
-    BasicBlock *newCutBB = cutBB->splitBasicBlock(cutI, cutBB->getName() + ".split"); // build new BB
-    Instruction *splitP = cutBB->getTerminator(); // 抓住cutI前一個指令作為 split 點，負責 call function 和 安插新 return
+    BasicBlock *newCutBB = cutBB->splitBasicBlock(cutI, cutBB->getName() + ".split");
 
-    // 2. 蒐集要移出去的 BB
-    std::vector<BasicBlock *> BlocksToMove;
+    // 3. 從 newCutBB 開始 BFS 收集所有要提取的 BasicBlocks
+    SmallVector<BasicBlock *, 16> BlocksToExtract;
+    SmallPtrSet<BasicBlock *, 16> Visited;
     std::queue<BasicBlock *> BBQueue;
-    std::vector<PHINode *> PHIs; // 用來檢查是否有 PHI node
-    
-    BlocksToMove.push_back(newCutBB);
     BBQueue.push(newCutBB);
-    while(BBQueue.size() > 0){
+    Visited.insert(newCutBB);
+    while(!BBQueue.empty()){
         BasicBlock *BB = BBQueue.front();
         BBQueue.pop();
+        BlocksToExtract.push_back(BB);
         for (BasicBlock *Succ : successors(BB)) {
-            for(auto &I: *Succ){
-                if(isa<PHINode>(I)){
-                    PHIs.push_back(dyn_cast<PHINode>(&I));
-                }
-            }
-            if (std::find(BlocksToMove.begin(), BlocksToMove.end(), Succ) == BlocksToMove.end()) {
-                BlocksToMove.push_back(Succ);
+            if (Visited.insert(Succ).second) {
                 BBQueue.push(Succ);
             }
-        }   
+        }
     }
 
-    if(!PHIs.empty()){
+    // 4. 用 CodeExtractor 提取
+    DominatorTree *DT = AM.getCachedResult<DominatorTreeAnalysis>(F);
+    CodeExtractor CE(BlocksToExtract, DT, /*AggregateArgs=*/false,
+                     /*BFI=*/nullptr, /*BPI=*/nullptr, /*AC=*/nullptr,
+                     /*AllowVarArgs=*/false, /*AllowAlloca=*/false,
+                     /*AllocationBlock=*/nullptr, /*Suffix=*/"cloned");
+
+    if (!CE.isEligible()) {
+        // 不適合提取，還原 split
         MergeBlockIntoPredecessor(newCutBB);
         return false;
     }
 
-    // 2.5 紀錄入口，避免有多個
-    std::unordered_map<BasicBlock *, std::vector<BasicBlock *>> entryBlocks;
-    std::unordered_map<BasicBlock *, BranchInst *> BRcallers;
-    for(auto &BB:BlocksToMove){
-        for(BasicBlock *Pred : predecessors(BB)){
-            // BB: 一定要移動的 BasicBlock，Pred: 會跳到 BB 的 BasicBlock，BI: Branch 本人
-            if(find(BlocksToMove.begin(), BlocksToMove.end(), Pred) == BlocksToMove.end()){
-                entryBlocks[BB].push_back(Pred);
-            }
-        }
-    }
-
-    ///***
-    if(entryBlocks.size() > 1){
-        MergeBlockIntoPredecessor(newCutBB);
-        return false;
-    }
-    //***/
-
-    // 3. 分析 LiveOuts
-    // 找到所有 cutI 前的 Instruction，分析切割後程式 Live Range
-    /***
-    我只想看在BlocksToMove中，且被BlocksToMove後面用到的指令
-    但比如說包含了%12 = phi i32 [ %4, %2 ], [ %10, %9 ]的話，我應該只有要 %12而不需要%4 %2 %10 %9
-    ***/
-    std::set<Value *> LiveOuts;
-    for(auto &BB:F){
-        if(std::find(BlocksToMove.begin(), BlocksToMove.end(), &BB) == BlocksToMove.end()){
-            for(auto &I:BB){
-                for(Use &U:I.uses()){
-                    if(Instruction *useInst = dyn_cast<Instruction>(U.getUser())){
-                        BasicBlock *useB = useInst->getParent();
-                        if(std::find(BlocksToMove.begin(), BlocksToMove.end(), useB) != BlocksToMove.end()){
-                            unsigned opIdx = U.getOperandNo();
-                            Value *operand = U.getUser()->getOperand(opIdx);   
-                            
-                            LiveOuts.insert(operand);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    for(auto &arg:F.args()){
-        for(Use &U:arg.uses()){
-            if(Instruction *useInst = dyn_cast<Instruction>(U.getUser())){
-                BasicBlock *useB = useInst->getParent();
-                if(std::find(BlocksToMove.begin(), BlocksToMove.end(), useB) != BlocksToMove.end()){
-                    LiveOuts.insert(&arg);
-                }
-            }
-        }
-    }
-
-    if(LiveOuts.empty()){
-        MergeBlockIntoPredecessor(newCutBB);
+    CodeExtractorAnalysisCache CEAC(F);
+    Function *newFunc = CE.extractCodeRegion(CEAC);
+    if (!newFunc) {
         return false;
     }
 
-    // 4. 建立 function 
-    // 4-1 取得 LiveOuts variable 型態，這會是新 function 的 argument type
-    FunctionType *FTy = F.getFunctionType();
-    std::vector<Type *> argTypes;
-    for(Value *LiveOut : LiveOuts){
-        Type *argType = LiveOut->getType();
-        argTypes.push_back(argType);
-    }
-
-    // 4-2. 取得return type，並與 argument type 建立 function type
-    FunctionType *newFTy = FunctionType::get(FTy->getReturnType(), argTypes, false);
-    //4-3. 建立新的 function
-    std::string newFuncName = F.getName().str() + "_cloned";
-    Function *newFunc = Function::Create(newFTy, F.getLinkage(), newFuncName, M);
-    // 只複製 function-level attributes（target-features, target-cpu 等）
-    // 不能用 setAttributes() 因為會把參數屬性也複製（型別不同會出錯）
-    newFunc->setAttributes(AttributeList::get(
-        M->getContext(), AttributeList::FunctionIndex,
-        F.getAttributes().getFnAttrs()));
+    // 5. 設定提取出來的 function 屬性（與原本行為一致）
+    newFunc->addFnAttr(Attribute::NoInline);
     // 移除 alwaysinline（避免跟 noinline 衝突）
     newFunc->removeFnAttr(Attribute::AlwaysInline);
-    if(F.hasPersonalityFn()){
-        newFunc->setPersonalityFn(F.getPersonalityFn());
-    }
-
-    // 5. 建立對應參數(ValueMap)
-    ValueToValueMapTy VMap;
-    unsigned argCount = 0;
-    auto argIt = newFunc->arg_begin();
-    for(Value *V : LiveOuts){
-        Value *arg = &*argIt++;
-        arg->setName("arg" + std::to_string(argCount++) + ".moved");
-        VMap[V] = arg;
-    }
-
-    // 6. 替換新function 的變數
-    // 不能直接用 replaceAllUsesWith()，會有風險（可能一部分被 split point 的 front 用，一部分被 back 用）
-    for(auto &BB : BlocksToMove){
-        for(auto &I : *BB){
-            for(unsigned i = 0; i < I.getNumOperands(); i++){
-                Value *Op = I.getOperand(i);
-                if(VMap.count(Op)){
-                    I.setOperand(i, VMap[Op]);
-                }
-            }
-        }
-    }
-    
-    // 7. 建立新函數的 entry
-    BasicBlock* entry;
-    entry = BasicBlock::Create(M->getContext(), "entry", newFunc);
-    IRBuilder<> Builder(entry);
-    Builder.CreateBr(newCutBB);
-
-    //8. 移動 basic block
-    for(auto &BB : BlocksToMove){
-        BB->removeFromParent();
-        BB->insertInto(newFunc);
-    }
-
-    // 9. 將原函數插入 Call, return
-    IRBuilder<> FBuilder(splitP);
-    std::vector<Value *> args;
-    for(Value *LiveOut : LiveOuts){
-        args.push_back(LiveOut);
-    }
-    Value *CallResult = FBuilder.CreateCall(newFunc, args);
-    if(FTy->getReturnType()->isVoidTy()){
-        FBuilder.CreateRetVoid();
-    }
-    else{
-        FBuilder.CreateRet(CallResult);
-    }  
-    splitP->eraseFromParent(); // 刪除原本的指令
-    newFunc->addFnAttr(Attribute::NoInline);
 
     bool broken = verifyFunction(*newFunc, &errs());
     if(broken){

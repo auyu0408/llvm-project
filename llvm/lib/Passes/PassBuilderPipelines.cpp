@@ -1445,8 +1445,6 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   // Add my pass
   if (RunMyCustomPartialInlining) {
     MPM.addPass(OnePassPIPass());
-    // 不在這裡加 buildFunctionSimplificationPipeline，
-    // 在OnePass內有需要（partial inline）的話執行。
   }
 
   // Run partial inlining pass to partially inline functions that have

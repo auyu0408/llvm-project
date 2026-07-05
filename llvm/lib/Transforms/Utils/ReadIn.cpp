@@ -50,55 +50,49 @@ PreservedAnalyses ReadInPass::run(Module &M, ModuleAnalysisManager &AM) {
     }
 
     // read decision file
-    if(InputFilePath.empty()){
-        //沒有提供input，全部inline？（可能修改）
-        errs() << "No decision file.\n";
-        return PreservedAnalyses::all();
-    }
+    // 如果沒有檔案或打不開，就保留前面已設定的預設值（goPartialInline = false）
+    if(!InputFilePath.empty()){
+        std::ifstream infile(InputFilePath);
+        if(infile){
+            std::string line;
+            while(std::getline(infile, line)){
+                // line的形式 Caller,Callee,callbase.id,inline
+                std::vector<std::string> arr;
+                std::string::size_type begin, end;
+                end = line.find(",");
+                begin = 0;
+                int cnt = 0;
 
-    std::ifstream infile(InputFilePath);
-    if(!infile){
-        errs() << "Failed to open file:" << InputFilePath << "\n";
-        return PreservedAnalyses::all();
-    }
-
-    std::string line;
-    while(std::getline(infile, line)){
-        // line的形式 Caller,Callee,callbase.id,inline
-        std::vector<std::string> arr;
-        std::string::size_type begin, end;
-        end = line.find(",");
-        begin = 0;
-        int cnt = 0;
-
-        while(end != std::string::npos){
-            if(end - begin != 0){
-                arr.push_back(line.substr(begin, end-begin));
+                while(end != std::string::npos){
+                    if(end - begin != 0){
+                        arr.push_back(line.substr(begin, end-begin));
+                        cnt++;
+                    }
+                    begin = end + 1;
+                    end = line.find(",", begin);
+                }
+                arr.push_back(line.substr(begin, line.size()));
                 cnt++;
+
+                if(cnt == 3) // 如果只有 Caller,Callee,callbase.id 的話代表沒有決定要不要 inline
+                    continue;
+
+                int id = std::stoi(arr[2]);
+                auto &Ctx = M.getContext();
+                auto temp_MDNode = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(
+                                Ctx, APInt{64, id, false})));
+                auto it = CBs_id.find(temp_MDNode);
+                if (it == CBs_id.end() || !it->second) continue;
+                auto *CB = it->second;
+                auto *NewMD = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(Type::getInt1Ty(
+                                              Ctx), 0)));
+                if(arr[3] == "inlined"){
+                    NewMD = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(Type::getInt1Ty(
+                                              Ctx), 1)));
+                }
+                CB->setMetadata("goPartialInline", NewMD);
             }
-            begin = end + 1;
-            end = line.find(",", begin);
         }
-        arr.push_back(line.substr(begin, line.size()));
-        cnt++;
-
-        if(cnt == 3) // 如果只有 Caller,Callee,callbase.id 的話代表沒有決定要不要 inline
-            continue;
-
-        int id = std::stoi(arr[2]);
-        auto &Ctx = M.getContext();
-        auto temp_MDNode = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(
-                        Ctx, APInt{64, id, false})));
-        auto it = CBs_id.find(temp_MDNode);
-        if (it == CBs_id.end() || !it->second) continue;
-        auto *CB = it->second;
-        auto *NewMD = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(Type::getInt1Ty(
-                                      Ctx), 0)));
-        if(arr[3] == "inlined"){
-            NewMD = MDNode::get(Ctx, ConstantAsMetadata::get(ConstantInt::get(Type::getInt1Ty(
-                                      Ctx), 1)));
-        }
-        CB->setMetadata("goPartialInline", NewMD);
     }
 
     return PreservedAnalyses::all();

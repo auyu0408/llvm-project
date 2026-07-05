@@ -69,7 +69,7 @@ static void signalHandler(int Sig) {
     std::signal(Sig, SIG_DFL);
     std::raise(Sig);
 }
-} // anonymous namespace
+} 
 //──────────────────
 
 size_t llvm::estimateModuleSize(Module &M){
@@ -181,10 +181,10 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
     InsideOnePassPI = true;
 
     // 1. 讀檔案
-    // 預設檔案名為 xxx.c -> xxx_c.partial.decision（當前目錄）
+    // decision 檔會跟 .o 放在同一個工作目錄
     if (InputFilePath.empty()) {
-        StringRef SrcFile = M.getSourceFileName();
-        std::string BaseName = sys::path::filename(SrcFile).str();
+        StringRef ModId = M.getModuleIdentifier();
+        std::string BaseName = sys::path::filename(ModId).str();
         std::replace(BaseName.begin(), BaseName.end(), '.', '_');
         InputFilePath = BaseName + ".partial.decision";
     }
@@ -288,19 +288,21 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                 MyFPM.addPass(MyPass());
                 MyFPM.run(*F_callee, FAM_c);
 
-                ModulePassManager SimplifyM_PM;
-                SimplifyM_PM.addPass(createModuleToFunctionPassAdaptor(
+                // Simplification → Optimization
+                ModulePassManager MPM_c;
+                MPM_c.addPass(createModuleToFunctionPassAdaptor(
                     PB_c.buildFunctionSimplificationPipeline(
                         OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
-                SimplifyM_PM.run(*M_comp, MAM_c);   
-
-                // 再跑剩下的 Oz pipeline（InsideOnePassPI guard 會阻止遞迴）
-                ModulePassManager OptMPM = PB_c.buildModuleOptimizationPipeline(OptimizationLevel::Oz,ThinOrFullLTOPhase::None);
-                OptMPM.run(*M_comp, MAM_c);
+                // InsideOnePassPI guard 會阻止遞迴
+                MPM_c.addPass(std::move(
+                    PB_c.buildModuleOptimizationPipeline(
+                        OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
+                MPM_c.run(*M_comp, MAM_c);
             }
 
             // (d) 量 size，跟 baseline 比較
             size_t sizeComp = estimateTextSize(*M_comp);
+            errs() << "sizeBaseline = " << sizeBaseline << ", sizeComp = " << sizeComp << "\n";
             if (sizeComp < sizeBaseline) {
                 Func_inlined_id.push_back(cand.id);
                 GSnapshot.AcceptedIDs.push_back(cand.id);  // 同步更新 snapshot
@@ -356,7 +358,17 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
 
     // (f) 寫入決策檔
     bool anyChange = false; // 標記是否真的有 partial inline 發生
-    if (const char *RecordFileName = std::getenv("RECORD_PARTIAL_INLINE")) {
+    const char *EnvRecord = std::getenv("RECORD_PARTIAL_INLINE");
+    std::string RecordFileName;
+    if (EnvRecord && EnvRecord[0] != '\0') {
+        RecordFileName = EnvRecord;
+    } else {
+        StringRef ModId = M.getModuleIdentifier();
+        std::string BaseName = sys::path::filename(ModId).str();
+        std::replace(BaseName.begin(), BaseName.end(), '.', '_');
+        RecordFileName = BaseName + ".p_decision";
+    }
+    if (!RecordFileName.empty()) {
         std::string RecordStr;
         raw_string_ostream RecordOS(RecordStr);
         for (Function &F : M) {
@@ -385,10 +397,9 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
         else
             errs() << "Warning: Could not open " << RecordFileName
                    << " (" << EC.message() << ")\n";
-        errs() << "Finished writing partial inline decisions\n";
     }
 
-    // (g) split
+    // (g) final split
     ModulePassManager MySplit;
     FunctionPassManager MyFPM;
     MyFPM.addPass(MyPass());
@@ -397,7 +408,7 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
 
     InsideOnePassPI = false;
     // 執行function simplification
-    if (anyChange){
+    if(anyChange){
         LoopAnalysisManager   LAM_cu;
         FunctionAnalysisManager FAM_cu;
         CGSCCAnalysisManager  CGAM_cu;

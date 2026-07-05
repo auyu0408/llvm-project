@@ -74,7 +74,7 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
 
     mappingNode(SCCs, alone);
 
-    std::unordered_map<std::pair<Value *, Value *>, int, PairHash> cap = buildCapacity1(F);
+    std::unordered_map<std::pair<Value *, Value *>, int, PairHash> cap = buildCapacity(F);
     // 建立可切割Graph
     InstGraph IG(To_Node, CFG, cap);
     
@@ -124,7 +124,7 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
     return PreservedAnalyses::none();
 }
 
-std::unordered_map<std::pair<Value *, Value *>, int, PairHash> buildCapacity1(Function &F){
+std::unordered_map<std::pair<Value *, Value *>, int, PairHash> buildCapacity(Function &F){
     std::unordered_map<std::pair<Value *, Value *>, int, PairHash> Cap;
     
     Cap.clear();
@@ -182,13 +182,17 @@ std::unordered_map<std::pair<Value *, Value *>, int, PairHash> buildCapacity1(Fu
         }
     }
 
+    // 設定 edge capacity：純粹看 live variable 數量
+    // CutCounts[i] + ValueCounts[i] = 穿過 edge i 的 live values 數量
+    // → 越多表示切這裡需要傳越多參數，capacity 越高（不容易被切）
     for(int i = 0; i < total - 1; i++){
-        addDependency(InstLists[i], InstLists[i+1], 1, Cap);
+        int liveCost = CutCounts[i] + ValueCounts[i];
+        addDependency(InstLists[i], InstLists[i+1], 1 + liveCost, Cap);
     }
 
     if(F.getReturnType()->isVoidTy()){
         if(total-2 >= 0){
-            addDependency(InstLists[total-2], InstLists[total-1], 1, Cap); // 如果是void function，最後一個指令會是return void
+            addDependency(InstLists[total-2], InstLists[total-1], total, Cap); // 不要切在最後
         }
     }
 
