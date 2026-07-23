@@ -46,9 +46,10 @@ static void dumpCurrentResults() {
                 if (Callee->isIntrinsic()) continue;
                 size_t id = getCallBaseId(CB);
                 bool pi = Accepted.count(id);
-                RecordOS << F.getName() << ','
-                         << Callee->getName() << ','
-                         << id << ','
+                F.printAsOperand(RecordOS, false);
+                RecordOS << ",";
+                Callee->printAsOperand(RecordOS, false);
+                RecordOS << ',' << id << ','
                          << (pi ? "inlined" : "not_inlined") << '\n';
             }
         }
@@ -205,7 +206,6 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
         // 3. 收集所有 candidate call sites（有 callbase.id 且 goPartialInline == false）
         struct Candidate {
             size_t id;
-            std::string calleeName;
         };
         SmallVector<Candidate, 32> candidates;
         for (Function &F : M) {
@@ -225,7 +225,7 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                         // 只跳過已經標記為 partial inline 的
                         if (hasPartialInlineVal(CB) && getPartialInlineVal(CB)) continue;
                         if (!Callee || Callee->isDeclaration()) continue;
-                        candidates.push_back({getCallBaseId(CB), Callee->getName().str()});
+                        candidates.push_back({getCallBaseId(CB)});
                     }
                 }
             }
@@ -249,10 +249,9 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
             std::unique_ptr<Module> M_comp = CloneModule(*M_current);
 
             // (b) 在 cloned module 中，用 callbase.id 找到對應的 CallBase，只把這一個設成 true
-            Function *F_callee = M_comp->getFunction(cand.calleeName);
-            if (!F_callee || F_callee->isDeclaration()) continue;
 
             bool found = false;
+            Function *F_callee = nullptr;
             for (Function &F_c : *M_comp) {
                 for (BasicBlock &BB : F_c) {
                     for (Instruction &I : BB) {
@@ -260,6 +259,8 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                         if (!CB) continue;
                         if (!hasCallBaseId(CB)) continue;
                         if (getCallBaseId(CB) == cand.id) {
+                            F_callee = CB->getCalledFunction();
+                            if (!F_callee || F_callee->isDeclaration()) break;
                             setPartialInlineVal(CB, true);
                             found = true;
                             break;
@@ -387,9 +388,10 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                     if (Callee->isIntrinsic()) continue;
                     size_t id = getCallBaseId(CB);
                     bool pi = hasPartialInlineVal(CB) && getPartialInlineVal(CB);
-                    RecordOS << F.getName() << ','
-                             << Callee->getName() << ','
-                             << id << ','
+                    F.printAsOperand(RecordOS, false);
+                    RecordOS << ",";
+                    Callee->printAsOperand(RecordOS, false);
+                    RecordOS << ',' << id << ','
                              << (pi ? "inlined" : "not_inlined") << '\n';
                     if(pi) anyChange = true;
                 }
