@@ -2,6 +2,7 @@
 #include "llvm/Transforms/Utils/MyFunction.h"
 #include "llvm/Transforms/IPO/SCCP.h"
 #include "llvm/Transforms/IPO/DeadArgumentElimination.h"
+#include "llvm/Support/FileSystem.h"
 
 #include <csignal>
 #include <cstdlib>
@@ -196,6 +197,38 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
     ModulePassManager MyRead;
     MyRead.addPass(ReadInPass());
     MyRead.run(M, MAM);
+
+    // ── DEBUG: 診斷 call site 狀態 ──
+    {
+        int totalCB = 0, hasId = 0, hasCallee = 0, nonDecl = 0, nonIntrinsic = 0;
+        for (Function &F : M) {
+            for (BasicBlock &BB : F) {
+                for (Instruction &I : BB) {
+                    auto *CB = dyn_cast<CallBase>(&I);
+                    if (!CB) continue;
+                    totalCB++;
+                    if (!hasCallBaseId(CB)) continue;
+                    hasId++;
+                    Function *Callee = CB->getCalledFunction();
+                    if (!Callee) continue;
+                    hasCallee++;
+                    if (Callee->isDeclaration()) continue;
+                    nonDecl++;
+                    if (Callee->isIntrinsic()) continue;
+                    nonIntrinsic++;
+                }
+            }
+        }
+        std::error_code EC;
+        raw_fd_ostream DbgOS("onepasspi_debug.log", EC, sys::fs::OF_Append);
+        if (!EC) {
+            DbgOS << "[OnePassPI] totalCB=" << totalCB
+                << " hasId=" << hasId
+                << " hasCallee=" << hasCallee
+                << " nonDecl=" << nonDecl
+                << " nonIntrinsic=" << nonIntrinsic << "\n";
+        }
+    }
 
     {
         // 2. baseline: clone → 完整 Oz → 量 size
