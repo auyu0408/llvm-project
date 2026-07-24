@@ -1,5 +1,6 @@
 #include "llvm/Transforms/Utils/OnePassPI.h"
 #include "llvm/Transforms/Utils/MyFunction.h"
+#include "llvm/Transforms/Instrumentation/FunctionID.h"
 #include "llvm/Transforms/IPO/SCCP.h"
 #include "llvm/Transforms/IPO/DeadArgumentElimination.h"
 #include "llvm/Support/FileSystem.h"
@@ -193,6 +194,18 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
         InputFilePath = BaseName + ".partial.decision";
     }
     
+    // 清除舊的 callbase.id metadata，重新分配
+    for (Function &F : M)
+        for (BasicBlock &BB : F)
+            for (Instruction &I : BB)
+                if (auto *CB = dyn_cast<CallBase>(&I))
+                    CB->setMetadata("callbase.id", nullptr);
+
+    // 跑 FunctionIDPass 重新賦予 callbase.id
+    ModulePassManager MyIDPM;
+    MyIDPM.addPass(FunctionIDPass());
+    MyIDPM.run(M, MAM);
+
     // read decision file
     ModulePassManager MyRead;
     MyRead.addPass(ReadInPass());
