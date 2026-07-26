@@ -9,10 +9,11 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
     if (F.hasFnAttribute(Attribute::AlwaysInline)) return PreservedAnalyses::all();
     if(F.getName().ends_with("cloned")) return PreservedAnalyses::none(); //已經split的不可再次處理
 
-    // 如果這個function有地方需要inline
-    bool inlined_flag = 0;
+    // 收集所有需要 partial inline 的 call site
+    SmallVector<CallInst*, 4> InlineCalls;
     for(auto *U:F.users()){
-        if(auto *CB = dyn_cast<CallBase>(U)){
+        if(auto *CI = dyn_cast<CallInst>(U)){
+            auto *CB = dyn_cast<CallBase>(U);
             auto *Callee = CB->getCalledFunction();
             auto *Caller = CB->getCaller();
             if(!Callee) continue;
@@ -22,13 +23,12 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
                 if(!hasPartialInlineVal(CB)) continue;
                 auto res = getPartialInlineVal(CB);
                 if((Callee == &F) && res){
-                    inlined_flag = 1;
-                    break;
+                    InlineCalls.push_back(CI);
                 }
             }
         }
     }
-    if(!inlined_flag) return PreservedAnalyses::all();
+    if(InlineCalls.empty()) return PreservedAnalyses::all();
     
     //不切割可變參數的function
     FunctionType *FT = F.getFunctionType();
@@ -77,6 +77,11 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
     std::unordered_map<std::pair<Value *, Value *>, int, PairHash> cap = buildCapacity(F);
     // 建立可切割Graph
     InstGraph IG(To_Node, CFG, cap);
+    // SCCs[0] is the collapsed argument source. The remaining SCC entries are
+    // real cycles and are excluded from destination split candidates.
+    for (size_t I = 1; I < SCCs.size(); ++I)
+        if (!SCCs[I].empty())
+            IG.loopNodes.insert(To_Node[SCCs[I].front()]);
     
     // Minimum Cut
     if(F.arg_empty()) return PreservedAnalyses::all();
@@ -88,28 +93,13 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
 
     int maxFlow = fordFulkerson(IG, source, target, rfs);
     if(maxFlow != 0){
-        std::vector<Instruction *> sepInsts;
-        findMinCut(IG, rfs, sepInsts);
+        Instruction *CutI = findBestSplitPoint(IG, rfs, F);
 
-        bool res = splitFunction(sepInsts, F, AM);
+        bool res = splitFunction(CutI, F, AM);
         if(res){
-            for(auto *U:F.users()){
-                if(auto *CI = dyn_cast<CallInst>(U)){
-                    auto *CB = dyn_cast<CallBase>(U);
-                    auto *Callee = CB->getCalledFunction();//CallInst 有繼承 CallBase
-                    auto *Caller = CB->getCaller();
-                    if(!Callee) continue;
-                    if(!Caller) continue;
-                    if(Callee->isIntrinsic()) continue;
-                    if(Callee->hasInternalLinkage()||Callee->isDSOLocal()){
-                        if(!hasPartialInlineVal(CB)) continue;
-                        auto res =  getPartialInlineVal(CB);
-                        if((Callee == &F) && res){
-                            InlineFunctionInfo IFI;
-                            InlineFunction(*CI, IFI);//這邊會用到CI，前面是用到CB所以兩個都要
-                        }
-                    }
-                }
+            for(auto *CI : InlineCalls){
+                InlineFunctionInfo IFI;
+                InlineFunction(*CI, IFI);
             }
             F.addFnAttr("MyPass"); // 避免被再次 inline
         }
@@ -126,73 +116,137 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
 
 std::unordered_map<std::pair<Value *, Value *>, int, PairHash> buildCapacity(Function &F){
     std::unordered_map<std::pair<Value *, Value *>, int, PairHash> Cap;
-    
-    Cap.clear();
+    using LiveSet = std::unordered_set<Value *>;
 
-    //幫Inst編號
-    std::vector<Instruction *> InstLists;
-    for(auto &BB:F){
-        for(auto &I:BB){
-            if(isa<Instruction>(I)){
-                InstLists.push_back(&I);
+    // Only local SSA values can become arguments of an outlined region.
+    // Constants and globals remain directly usable and must not increase the
+    // boundary-argument cost.
+    auto IsLocalSSAValue = [&F](Value *V) {
+        if (isa<Argument>(V))
+            return cast<Argument>(V)->getParent() == &F;
+        if (auto *I = dyn_cast<Instruction>(V))
+            return I->getFunction() == &F && !I->getType()->isVoidTy();
+        return false;
+    };
+
+    std::unordered_map<BasicBlock *, LiveSet> Use, Def, LiveIn, LiveOut;
+
+    // Build block Use/Def sets. PHI operands are deliberately excluded here:
+    // an incoming PHI value is used on its predecessor edge, not in the PHI's
+    // block.
+    for (BasicBlock &BB : F) {
+        LiveSet &BBUse = Use[&BB];
+        LiveSet &BBDef = Def[&BB];
+        for (Instruction &I : BB) {
+            if (!isa<PHINode>(I)) {
+                for (Value *V : I.operands())
+                    if (IsLocalSSAValue(V) && !BBDef.count(V))
+                        BBUse.insert(V);
+            }
+            if (!I.getType()->isVoidTy())
+                BBDef.insert(&I);
+        }
+    }
+
+    // Values live on Pred -> Succ. LiveIn[Succ] accounts for ordinary uses;
+    // PHI definitions are removed and the incoming operands associated with
+    // this exact predecessor edge are added.
+    auto ComputeEdgeLive = [&](BasicBlock *Pred, BasicBlock *Succ) {
+        LiveSet EdgeLive = LiveIn[Succ];
+        for (PHINode &PN : Succ->phis()) {
+            EdgeLive.erase(&PN);
+            for (unsigned I = 0, E = PN.getNumIncomingValues(); I != E; ++I) {
+                if (PN.getIncomingBlock(I) != Pred)
+                    continue;
+                Value *Incoming = PN.getIncomingValue(I);
+                if (IsLocalSSAValue(Incoming))
+                    EdgeLive.insert(Incoming);
             }
         }
-    }
-    int total = InstLists.size();
+        return EdgeLive;
+    };
 
-    std::vector<int> CutCounts(InstLists.size(), 0);
-    DenseSet<std::pair<Value *, Value *>> rec;
-    //data dependency
-    for(Instruction *I : InstLists){
-        for(Use &U : I->operands()){
-            Value *V = U.get();
-            Instruction *Def = dyn_cast<Instruction>(V);
-            if(!Def) continue; // 如果不是指令就跳過
-            auto def_it = std::find(InstLists.begin(), InstLists.end(), Def);
-            auto use_it = std::find(InstLists.begin(), InstLists.end(), I);
-            if(def_it == InstLists.end() || use_it == InstLists.end()) continue; // 如果找不到就跳過
-            size_t def_idx = std::distance(InstLists.begin(), def_it);
-            size_t use_idx = std::distance(InstLists.begin(), use_it);
-            for(size_t i = def_idx; i < use_idx; i++){
-                if(rec.count({Def, InstLists[i]})) continue; // 如果已經處理過就跳過
-                rec.insert({Def, InstLists[i]});
-                CutCounts[i]++;
+    // Standard backward CFG liveness fixed point:
+    //   LiveOut[B] = union EdgeLive(B, Succ)
+    //   LiveIn[B]  = Use[B] union (LiveOut[B] - Def[B])
+    bool Changed;
+    do {
+        Changed = false;
+        for (BasicBlock &BB : reverse(F)) {
+            LiveSet NewOut;
+            for (BasicBlock *Succ : successors(&BB)) {
+                LiveSet EdgeLive = ComputeEdgeLive(&BB, Succ);
+                NewOut.insert(EdgeLive.begin(), EdgeLive.end());
+            }
+
+            LiveSet NewIn = Use[&BB];
+            for (Value *V : NewOut)
+                if (!Def[&BB].count(V))
+                    NewIn.insert(V);
+
+            if (NewOut != LiveOut[&BB] || NewIn != LiveIn[&BB]) {
+                LiveOut[&BB] = std::move(NewOut);
+                LiveIn[&BB] = std::move(NewIn);
+                Changed = true;
             }
         }
-    }
+    } while (Changed);
 
-    //argument dependency
-    rec.clear();
-    std::vector<int> ValueCounts(InstLists.size(), 0);
-    for(auto &arg:F.args()){
-        Value *src = &arg;
-        int center = (total + 1) / 2;
-        addDependency(src, InstLists[0], center, Cap);
-        for(auto U:src->users()){
-            Instruction *I = dyn_cast<Instruction>(U);
-            auto use_it = std::find(InstLists.begin(), InstLists.end(), I);
-            if(use_it == InstLists.end()) continue;
-            size_t use_idx = std::distance(InstLists.begin(), use_it);
+    // Assign a capacity to every real instruction-flow edge. Within a block,
+    // the cost is the number of values live immediately after the source
+    // instruction. Across blocks, it is the edge-specific live set, including
+    // the correct incoming operands of successor PHIs.
+    unsigned InstructionCount = 0;
+    for (BasicBlock &BB : F) {
+        InstructionCount += BB.size();
+        LiveSet Live = LiveOut[&BB];
+        for (Instruction &I : reverse(BB)) {
+            Instruction *Next = I.getNextNode();
+            if (Next)
+                addDependency(&I, Next, 1 + Live.size(), Cap);
 
-            for(size_t i = 0; i < use_idx; i++){
-                if(rec.count({src, InstLists[i]})) continue;
-                rec.insert({src, InstLists[i]});
-                ValueCounts[i]++;
-            } 
+            if (!I.getType()->isVoidTy())
+                Live.erase(&I);
+            if (!isa<PHINode>(I))
+                for (Value *V : I.operands())
+                    if (IsLocalSSAValue(V))
+                        Live.insert(V);
+        }
+
+        Instruction *Term = BB.getTerminator();
+        for (BasicBlock *Succ : successors(&BB)) {
+            LiveSet EdgeLive = ComputeEdgeLive(&BB, Succ);
+            addDependency(Term, &Succ->front(), 1 + EdgeLive.size(), Cap);
         }
     }
 
-    // 設定 edge capacity：純粹看 live variable 數量
-    // CutCounts[i] + ValueCounts[i] = 穿過 edge i 的 live values 數量
-    // → 越多表示切這裡需要傳越多參數，capacity 越高（不容易被切）
-    for(int i = 0; i < total - 1; i++){
-        int liveCost = CutCounts[i] + ValueCounts[i];
-        addDependency(InstLists[i], InstLists[i+1], 1 + liveCost, Cap);
+    // All arguments are collapsed into the source node. Distribute the entry
+    // capacity over their parallel source edges so InstGraph's aggregation
+    // yields exactly 1 + the number of live function arguments at entry.
+    if (!F.empty() && !F.getEntryBlock().empty()) {
+        Instruction *Entry = &F.getEntryBlock().front();
+        bool AddedBaseCost = false;
+        for (Argument &Arg : F.args()) {
+            int Weight = LiveIn[&F.getEntryBlock()].count(&Arg) ? 1 : 0;
+            if (!AddedBaseCost) {
+                ++Weight;
+                AddedBaseCost = true;
+            }
+            addDependency(&Arg, Entry, Weight, Cap);
+        }
     }
 
-    if(F.getReturnType()->isVoidTy()){
-        if(total-2 >= 0){
-            addDependency(InstLists[total-2], InstLists[total-1], total, Cap); // 不要切在最後
+    // Keep the existing policy of discouraging a useless split immediately
+    // before "ret void". Invalid return-adjacent cuts are also filtered later.
+    if (F.getReturnType()->isVoidTy()) {
+        for (BasicBlock &BB : F) {
+            auto *RI = dyn_cast<ReturnInst>(BB.getTerminator());
+            if (!RI)
+                continue;
+            if (Instruction *Prev = RI->getPrevNode())
+                addDependency(
+                    Prev, RI,
+                    std::max<int>(Cap[{Prev, RI}], InstructionCount), Cap);
         }
     }
 

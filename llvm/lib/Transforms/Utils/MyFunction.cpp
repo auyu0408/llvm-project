@@ -1,4 +1,8 @@
 #include "llvm/Transforms/Utils/MyFunction.h"
+#include "llvm/IR/InstIterator.h"
+
+#include <limits>
+#include <optional>
 
 using namespace llvm;
 
@@ -25,9 +29,15 @@ namespace llvm{
             for(auto *v_V:ele.second){
                 NodeNo v_num = Node_map[v_V];
 
-                if(!adjList[u_num].count(v_num)){
-                    adjList[u_num].insert(v_num); //把u插入v，相同node會因為v_num已經存在而不會重複插入
-                }
+                if (u_num == v_num)
+                    continue;
+
+                // Residual traversal needs both directions in the adjacency
+                // graph. The reverse direction starts with zero capacity unless
+                // it is also a real CFG edge whose capacity is populated below.
+                adjList[u_num].insert(v_num);
+                adjList[v_num].insert(u_num);
+                originalEdges[{u_num, v_num}].push_back({u_V, v_V});
             }
         }
 
@@ -39,8 +49,17 @@ namespace llvm{
 
             if(!rec.count({u_V, v_V}) && u_num!=v_num){
                 capacity[{u_num, v_num}] += Cap[{u_V, v_V}];
-                flow[{u_num, v_num}] = 0;
                 rec.insert({u_V, v_V});
+            }
+        }
+
+        // Materialize every residual edge. Real forward (and possible
+        // anti-parallel CFG) capacities were accumulated above; synthetic
+        // reverse edges retain the default zero capacity.
+        for (auto &[u, Neighbors] : adjList) {
+            for (NodeNo v : Neighbors) {
+                capacity.try_emplace({u, v}, 0);
+                flow[{u, v}] = 0;
             }
         }
     }
@@ -131,8 +150,11 @@ int fordFulkerson(InstGraph& G, Value* source, Value* target,
     int maxFlow = 0;
     while(true){
         std::unordered_map<NodeNo, NodeNo> parent;
+        std::unordered_set<NodeNo> visited;
         std::queue<NodeNo> q;
-        q.push(To_Node[source]);
+        NodeNo sourceNode = To_Node[source];
+        q.push(sourceNode);
+        visited.insert(sourceNode);
 
         //use BFS to find path p
         while(!q.empty()){
@@ -140,7 +162,9 @@ int fordFulkerson(InstGraph& G, Value* source, Value* target,
             q.pop();
 
             for(auto v:G.adjList[u]){
-                if(parent.find(v) == parent.end() && G.capacity[{u, v}] > G.flow[{u, v}]){
+                if(!visited.count(v) &&
+                   G.capacity[{u, v}] > G.flow[{u, v}]){
+                    visited.insert(v);
                     parent[v] = u; //parent[child] = parent;
                     if(v == To_Node[target]) break;//已經到target了
                     q.push(v);
@@ -187,26 +211,152 @@ int fordFulkerson(InstGraph& G, Value* source, Value* target,
     return maxFlow;
 }
 
-void findMinCut(InstGraph& G, const std::unordered_set<NodeNo> &reachableFromSource, std::vector<Instruction *> &sepInsts){
+namespace {
+using InstructionEdge = std::pair<Instruction *, Instruction *>;
 
-    for(auto& [u,neighbors]:G.adjList){
-        if(reachableFromSource.count(u)){
-            for(NodeNo v : neighbors){
-                if(!reachableFromSource.count(v) && G.capacity[{u, v}] > 0){
-                    auto *u_v = To_Value[u].back();
-                    auto *v_v = To_Value[v][0];
-                    if(u_v && dyn_cast<Instruction>(u_v)){
-                        auto *u_I = dyn_cast<Instruction>(u_v);
-                        sepInsts.push_back(u_I);
-                    }
-                    if(v_v && dyn_cast<Instruction>(v_v)){
-                        auto *v_I = dyn_cast<Instruction>(v_v);
-                        sepInsts.push_back(v_I);
-                    }
-                }
-            }
+static std::optional<unsigned>
+evaluateSplitCandidate(Instruction *CutI, Function &F) {
+    unsigned CutIndex = 0;
+    bool Found = false;
+    for (Instruction &I : instructions(F)) {
+        if (&I == CutI) {
+            Found = true;
+            break;
+        }
+        ++CutIndex;
+    }
+    if (!Found)
+        return std::nullopt;
+
+    // Evaluate on a clone because splitting return blocks and discovering the
+    // exact CodeExtractor interface mutates the function.
+    std::unique_ptr<Module> Clone = CloneModule(*F.getParent());
+    Function *CloneF = Clone->getFunction(F.getName());
+    if (!CloneF)
+        return std::nullopt;
+
+    Instruction *CloneCutI = nullptr;
+    unsigned Index = 0;
+    for (Instruction &I : instructions(*CloneF)) {
+        if (Index++ == CutIndex) {
+            CloneCutI = &I;
+            break;
         }
     }
+    if (!CloneCutI)
+        return std::nullopt;
+
+    BasicBlock *CutBB = CloneCutI->getParent();
+    BasicBlock *NewCutBB =
+        CutBB->splitBasicBlock(CloneCutI, CutBB->getName() + ".split.eval");
+
+    SmallVector<BasicBlock *, 16> BlocksToExtract;
+    SmallPtrSet<BasicBlock *, 16> Visited;
+    std::queue<BasicBlock *> Queue;
+    Queue.push(NewCutBB);
+    Visited.insert(NewCutBB);
+    while (!Queue.empty()) {
+        BasicBlock *BB = Queue.front();
+        Queue.pop();
+        BlocksToExtract.push_back(BB);
+        for (BasicBlock *Succ : successors(BB))
+            if (Visited.insert(Succ).second)
+                Queue.push(Succ);
+    }
+
+    DominatorTree DT(*CloneF);
+    CodeExtractor CE(BlocksToExtract, &DT, /*AggregateArgs=*/false,
+                     /*BFI=*/nullptr, /*BPI=*/nullptr, /*AC=*/nullptr,
+                     /*AllowVarArgs=*/false, /*AllowAlloca=*/false,
+                     /*AllocationBlock=*/nullptr, /*Suffix=*/"candidate");
+    if (!CE.isEligible())
+        return std::nullopt;
+
+    CodeExtractorAnalysisCache CEAC(*CloneF);
+    SetVector<Value *> Inputs, Outputs;
+    Function *Outlined = CE.extractCodeRegion(CEAC, Inputs, Outputs);
+    if (!Outlined)
+        return std::nullopt;
+
+    // AggregateArgs is false, so each exact CodeExtractor input and output
+    // corresponds to one parameter in the outlined function.
+    return Outlined->arg_size();
+}
+} // namespace
+
+Instruction *findBestSplitPoint(
+    InstGraph &G,
+    const std::unordered_set<NodeNo> &reachableFromSource,
+    Function &F) {
+    DenseMap<Instruction *, unsigned> InstructionOrder;
+    unsigned NextOrder = 0;
+    for (Instruction &I : instructions(F))
+        InstructionOrder[&I] = NextOrder++;
+
+    SmallVector<InstructionEdge, 16> CutEdges;
+    DenseSet<InstructionEdge> Seen;
+
+    // Recover every real instruction-level edge crossing the complete S/T
+    // partition. Synthetic reverse residual edges are intentionally excluded.
+    for (auto &[NodeEdge, Edges] : G.originalEdges) {
+        NodeNo U = NodeEdge.first;
+        NodeNo V = NodeEdge.second;
+        if (!reachableFromSource.count(U) || reachableFromSource.count(V) ||
+            G.capacity[{U, V}] <= 0)
+            continue;
+
+        for (auto [SourceV, DestV] : Edges) {
+            auto *SourceI = dyn_cast<Instruction>(SourceV);
+            auto *DestI = dyn_cast<Instruction>(DestV);
+            if (!SourceI || !DestI)
+                continue;
+            InstructionEdge Edge{SourceI, DestI};
+            if (Seen.insert(Edge).second)
+                CutEdges.push_back(Edge);
+        }
+    }
+
+    // Stable order and tie-breaker: destination instruction order first, then
+    // source instruction order.
+    llvm::sort(CutEdges, [&](const InstructionEdge &L,
+                             const InstructionEdge &R) {
+        unsigned LDest = InstructionOrder.lookup(L.second);
+        unsigned RDest = InstructionOrder.lookup(R.second);
+        if (LDest != RDest)
+            return LDest < RDest;
+        return InstructionOrder.lookup(L.first) <
+               InstructionOrder.lookup(R.first);
+    });
+
+    Instruction *Best = nullptr;
+    unsigned BestArgumentCount = std::numeric_limits<unsigned>::max();
+    for (auto [SourceI, DestI] : CutEdges) {
+        NodeNo DestNode = To_Node[DestI];
+
+        // The current transformation supports a single instruction boundary
+        // within a block. Cross-block edges have terminator sources and are not
+        // valid single splitBasicBlock points.
+        if (SourceI->isTerminator() || isa<ReturnInst>(SourceI) ||
+            isa<PHINode>(DestI) || isa<ReturnInst>(DestI) ||
+            G.loopNodes.count(DestNode) ||
+            SourceI->getParent() != DestI->getParent() ||
+            SourceI->getNextNode() != DestI)
+            continue;
+
+        std::optional<unsigned> ArgumentCount =
+            evaluateSplitCandidate(DestI, F);
+        if (!ArgumentCount)
+            continue;
+
+        // CutEdges is already in deterministic instruction order, so retaining
+        // the first equal-cost candidate implements the required tie-breaker.
+        if (*ArgumentCount < BestArgumentCount) {
+            BestArgumentCount = *ArgumentCount;
+            Best = DestI;
+        }
+    }
+
+    return Best;
 }
 
 
@@ -305,20 +455,18 @@ void mappingNode(std::vector<std::vector<Value *>> &SCCs, std::vector<std::vecto
     return;
 }
 
-bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM){   
+bool splitFunction(Instruction *cutI, Function &F, FunctionAnalysisManager &AM){
     // 1. 基本檢查
-    if(sepInsts.size() < 2){
+    if (!cutI) {
         return false;
     }
-    Instruction *cutI = sepInsts[1];
     
-    if(isa<PHINode>(cutI)){
-        cutI = cutI -> getNextNode(); // PHI node 不能被切割，所以要往後找
+    if (isa<PHINode>(cutI)) {
+        cutI = cutI->getNextNode(); // PHI node 不能被切割，所以要往後找
+        if (!cutI)
+            return false;
     }
-    if(sepInsts[0]->isTerminator()){
-        return false;
-    }
-    if(isa<ReturnInst>(sepInsts[0])||(sepInsts.size() > 1 && isa<ReturnInst>(sepInsts[1]))){
+    if (isa<ReturnInst>(cutI)) {
         return false;
     }
 
@@ -359,6 +507,11 @@ bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAna
     CodeExtractorAnalysisCache CEAC(F);
     Function *newFunc = CE.extractCodeRegion(CEAC);
     if (!newFunc) {
+        // extractCodeRegion currently returns null before performing extraction
+        // when eligibility fails. Defensively restore the block split so a
+        // failed transformation leaves the original CFG unchanged.
+        if (!MergeBlockIntoPredecessor(newCutBB))
+            errs() << "Failed to restore split block after extraction failure.\n";
         return false;
     }
 

@@ -77,6 +77,9 @@ PreservedAnalyses MyPass2::run(Function &F, FunctionAnalysisManager &AM){
     std::unordered_map<std::pair<Value *, Value *>, int, PairHash> cap = buildCapacity2(F);
     // 建立可切割Graph
     InstGraph IG(To_Node, CFG, cap);
+    for (size_t I = 1; I < SCCs.size(); ++I)
+        if (!SCCs[I].empty())
+            IG.loopNodes.insert(To_Node[SCCs[I].front()]);
     
     // Minimum Cut
     std::unordered_set<NodeNo> rfs;
@@ -87,10 +90,9 @@ PreservedAnalyses MyPass2::run(Function &F, FunctionAnalysisManager &AM){
 
     int maxFlow = fordFulkerson(IG, source, target, rfs);
     if(maxFlow != 0){
-        std::vector<Instruction *> sepInsts;
-        findMinCut(IG, rfs, sepInsts);
+        Instruction *CutI = findBestSplitPoint(IG, rfs, F);
 
-        bool res = splitFunction(sepInsts, F, AM);
+        bool res = splitFunction(CutI, F, AM);
         if(res){
             for(auto *U:F.users()){
                 if(auto *CI = dyn_cast<CallInst>(U)){

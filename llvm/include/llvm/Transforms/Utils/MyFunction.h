@@ -70,6 +70,10 @@ namespace llvm{
         std::unordered_map<NodeNo, std::unordered_set<NodeNo>> adjList;
         std::unordered_map<std::pair<NodeNo, NodeNo>, int, PairHash> capacity;
         std::unordered_map<std::pair<NodeNo, NodeNo>, int, PairHash> flow;
+        std::unordered_map<std::pair<NodeNo, NodeNo>,
+                           std::vector<std::pair<Value *, Value *>>, PairHash>
+            originalEdges;
+        std::unordered_set<NodeNo> loopNodes;
         InstGraph(std::unordered_map<Value *, NodeNo> Node_map, std::unordered_map<Value *, std::vector<Value *>>& CFG,
             std::unordered_map<std::pair<Value *, Value *>, int, PairHash>& Cap);
     };
@@ -128,7 +132,10 @@ size_t getCallBaseId(const CallBase *CB);
 bool hasCallBaseId(const CallBase *CB);
 int fordFulkerson(InstGraph& G, Value* source, Value* target,
                     std::unordered_set<NodeNo>& reachableFromSource);
-void findMinCut(InstGraph& G, const std::unordered_set<NodeNo> &reachableFromSource, std::vector<Instruction *> &sepInsts);
+Instruction *findBestSplitPoint(
+    InstGraph &G,
+    const std::unordered_set<NodeNo> &reachableFromSource,
+    Function &F);
 std::unordered_map<Value *, std::vector<Value *>> buildGraph(Function &F);
 void addDependency(Value* src, Value* dest, int w, 
                     std::unordered_map<std::pair<Value *, Value *>, int, PairHash> &Cap);
@@ -136,4 +143,4 @@ void addDependency(Value* src, Value* dest, int w,
 std::vector<ReturnInst*> getAllReturnInsts(Function &F);
 Instruction* getLatestReturn(Function &F, PostDominatorTree &PDT);
 void mappingNode(std::vector<std::vector<Value *>> &SCCs, std::vector<std::vector<Value *>> &alone);
-bool splitFunction(std::vector<Instruction *> sepInsts, Function &F, FunctionAnalysisManager &AM);
+bool splitFunction(Instruction *cutI, Function &F, FunctionAnalysisManager &AM);

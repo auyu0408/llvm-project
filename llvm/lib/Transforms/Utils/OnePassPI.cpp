@@ -123,7 +123,9 @@ size_t llvm::estimateTextSize(Module &M) {
     PM.run(M);
     // 到這邊如果使用 ObjBuf.size(); 會得到 object file 的大小
 
-    // 從 .o buffer 中 parse 出 .text section 大小
+    // Parse every section classified as executable text by LLVM's object-file
+    // abstraction. This includes target/object-format-specific text subsections
+    // such as ELF .text.foo, rather than only a section named exactly ".text".
     auto BufRef = MemoryBufferRef(
         StringRef(ObjBuf.data(), ObjBuf.size()), "in-memory.o");
     auto ObjOrErr = object::ObjectFile::createObjectFile(BufRef);
@@ -135,14 +137,8 @@ size_t llvm::estimateTextSize(Module &M) {
 
     size_t textSize = 0;
     for (const auto &Sec : (*ObjOrErr)->sections()) {
-        auto NameOrErr = Sec.getName();
-        if (!NameOrErr) {
-            consumeError(NameOrErr.takeError());
-            continue;
-        }
-        if (*NameOrErr == ".text") {
+        if (Sec.isText() && !Sec.isVirtual())
             textSize += Sec.getSize();
-        }
     }
     return textSize;
 }
@@ -179,6 +175,49 @@ static size_t ModuleOpt(Module &M) {
 // 此 guard 確保遞迴呼叫直接返回。
 static bool InsideOnePassPI = false;
 
+/// Materialize every marked partial-inlining decision on \p M and verify the
+/// complete module. This is used transactionally on clones before a tuning
+/// candidate is measured and before accepted decisions are applied to the real
+/// module.
+static bool materializeAndVerify(Module &M, bool RunCleanup) {
+    LoopAnalysisManager LAM;
+    FunctionAnalysisManager FAM;
+    CGSCCAnalysisManager CGAM;
+    ModuleAnalysisManager MAM;
+
+    PassBuilder PB;
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+    FunctionPassManager FPM;
+    FPM.addPass(MyPass());
+    ModulePassManager SplitMPM;
+    SplitMPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+    SplitMPM.run(M, MAM);
+
+    if (verifyModule(M, &errs())) {
+        return false;
+    }
+
+    if (RunCleanup) {
+        ModulePassManager CleanupMPM;
+        CleanupMPM.addPass(IPSCCPPass());
+        CleanupMPM.addPass(DeadArgumentEliminationPass());
+        CleanupMPM.addPass(createModuleToFunctionPassAdaptor(
+            PB.buildFunctionSimplificationPipeline(
+                OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
+        CleanupMPM.run(M, MAM);
+
+        if (verifyModule(M, &errs())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
     // Re-entrance guard
     if (InsideOnePassPI)
@@ -211,37 +250,6 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
     MyRead.addPass(ReadInPass());
     MyRead.run(M, MAM);
 
-    // ── DEBUG: 診斷 call site 狀態 ──
-    {
-        int totalCB = 0, hasId = 0, hasCallee = 0, nonDecl = 0, nonIntrinsic = 0;
-        for (Function &F : M) {
-            for (BasicBlock &BB : F) {
-                for (Instruction &I : BB) {
-                    auto *CB = dyn_cast<CallBase>(&I);
-                    if (!CB) continue;
-                    totalCB++;
-                    if (!hasCallBaseId(CB)) continue;
-                    hasId++;
-                    Function *Callee = CB->getCalledFunction();
-                    if (!Callee) continue;
-                    hasCallee++;
-                    if (Callee->isDeclaration()) continue;
-                    nonDecl++;
-                    if (Callee->isIntrinsic()) continue;
-                    nonIntrinsic++;
-                }
-            }
-        }
-        std::error_code EC;
-        raw_fd_ostream DbgOS("onepasspi_debug.log", EC, sys::fs::OF_Append);
-        if (!EC) {
-            DbgOS << "[OnePassPI] totalCB=" << totalCB
-                << " hasId=" << hasId
-                << " hasCallee=" << hasCallee
-                << " nonDecl=" << nonDecl
-                << " nonIntrinsic=" << nonIntrinsic << "\n";
-        }
-    }
 
     {
         // 2. baseline: clone → 完整 Oz → 量 size
@@ -249,11 +257,15 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
         std::unique_ptr<Module> M_baseline = CloneModule(M);
         size_t sizeBaseline = ModuleOpt(*M_baseline);
 
-        // 3. 收集所有 candidate call sites（有 callbase.id 且 goPartialInline == false）
-        struct Candidate {
-            size_t id;
+        // 3. 收集 candidate call sites，以 callee function 為單位分組。
+        //    candidates 保留 callee 第一次出現在 module/BB/instruction traversal
+        //    中的順序；DenseMap 只用來查詢既有 candidate 的 index。
+        struct FuncCandidate {
+            Function *Callee;                    // 原 module 中的 callee 指標
+            SmallVector<size_t, 4> ids;           // 該 callee 的所有 call site id
         };
-        SmallVector<Candidate, 32> candidates;
+        SmallVector<FuncCandidate, 16> candidates;
+        DenseMap<Function*, size_t> CalleeToCandidateIndex;
         for (Function &F : M) {
             for (BasicBlock &BB : F) {
                 for (Instruction &I : BB) {
@@ -267,11 +279,13 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                     if(!Caller) continue;
                     if(Callee->isIntrinsic()) continue;
                     if(Callee->hasInternalLinkage()||Callee->isDSOLocal()){
-                        // 已經在 Inliner 之後，被 inline 的 call sites 已不存在
-                        // 只跳過已經標記為 partial inline 的
                         if (hasPartialInlineVal(CB) && getPartialInlineVal(CB)) continue;
                         if (!Callee || Callee->isDeclaration()) continue;
-                        candidates.push_back({getCallBaseId(CB)});
+                        auto [It, Inserted] = CalleeToCandidateIndex.try_emplace(
+                            Callee, candidates.size());
+                        if (Inserted)
+                            candidates.push_back({Callee, {}});
+                        candidates[It->second].ids.push_back(getCallBaseId(CB));
                     }
                 }
             }
@@ -286,39 +300,41 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
         auto PrevSIGINT  = std::signal(SIGINT,  signalHandler);
         auto PrevSIGTERM = std::signal(SIGTERM, signalHandler);
 
-        // 4. Greedy: 維護一個累積的 module，成功的改動會帶到下一個 candidate
-        //    M_current = 目前最好的狀態，每次 clone 來源是 M_current
+        // 4. Greedy: 以 callee function 為單位
         std::unique_ptr<Module> M_current = CloneModule(M);
 
         for (const auto &cand : candidates) {
             // (a) 從目前最佳狀態 clone
             std::unique_ptr<Module> M_comp = CloneModule(*M_current);
 
-            // (b) 在 cloned module 中，用 callbase.id 找到對應的 CallBase，只把這一個設成 true
-
-            bool found = false;
-            Function *F_callee = nullptr;
+            // (b) 在 cloned module 中，把該 callee 的所有 call site 都標記為 true
+            DenseSet<size_t> candIdSet(cand.ids.begin(), cand.ids.end());
+            int markCount = 0;
             for (Function &F_c : *M_comp) {
                 for (BasicBlock &BB : F_c) {
                     for (Instruction &I : BB) {
                         auto *CB = dyn_cast<CallBase>(&I);
                         if (!CB) continue;
                         if (!hasCallBaseId(CB)) continue;
-                        if (getCallBaseId(CB) == cand.id) {
-                            F_callee = CB->getCalledFunction();
-                            if (!F_callee || F_callee->isDeclaration()) break;
+                        if (candIdSet.count(getCallBaseId(CB))) {
+                            Function *Callee = CB->getCalledFunction();
+                            if (!Callee || Callee->isDeclaration())
+                                continue;
                             setPartialInlineVal(CB, true);
-                            found = true;
-                            break;
+                            markCount++;
                         }
                     }
-                    if (found) break;
                 }
-                if (found) break;
             }
-            if (!found) continue;
+            if (markCount == 0) continue;
 
-            // (c) 在 cloned module 上跑 MyPass + 完整 Oz pipeline
+            // (c) Transactionally materialize all accepted decisions plus the
+            // current candidate on the clone. A verifier failure rejects this
+            // candidate before optimization or size comparison.
+            if (!materializeAndVerify(*M_comp, /*RunCleanup=*/false))
+                continue;
+
+            // Run the remaining optimization pipeline on the verified clone.
             {
                 LoopAnalysisManager   LAM_c;
                 FunctionAnalysisManager FAM_c;
@@ -331,11 +347,6 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                 PB_c.registerFunctionAnalyses(FAM_c);
                 PB_c.registerLoopAnalyses(LAM_c);
                 PB_c.crossRegisterProxies(LAM_c, FAM_c, CGAM_c, MAM_c);
-
-                // 先做 function splitting
-                FunctionPassManager MyFPM;
-                MyFPM.addPass(MyPass());
-                MyFPM.run(*F_callee, FAM_c);
 
                 // Simplification → Optimization
                 ModulePassManager MPM_c;
@@ -352,31 +363,31 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                 MPM_c.run(*M_comp, MAM_c);
             }
 
+            if (verifyModule(*M_comp, &errs())) {
+                continue;
+            }
+
             // (d) 量 size，跟 baseline 比較
             size_t sizeComp = estimateTextSize(*M_comp);
-            errs() << "sizeBaseline = " << sizeBaseline << ", sizeComp = " << sizeComp << "\n";
             if (sizeComp < sizeBaseline) {
-                Func_inlined_id.push_back(cand.id);
-                GSnapshot.AcceptedIDs.push_back(cand.id);  // 同步更新 snapshot
-                // Greedy: 更新 baseline 和 M_current，保留這次的改動
+                // 接受該 callee 的所有 call site
+                for (size_t id : cand.ids) {
+                    Func_inlined_id.push_back(id);
+                    GSnapshot.AcceptedIDs.push_back(id);
+                }
                 sizeBaseline = sizeComp;
-                // 在 M_current 上也標記這個 call site 為 true
+                // 在 M_current 上也標記這些 call site 為 true
                 for (Function &F_c : *M_current) {
-                    bool done = false;
                     for (BasicBlock &BB : F_c) {
                         for (Instruction &I : BB) {
                             auto *CB = dyn_cast<CallBase>(&I);
                             if (!CB) continue;
                             if (!hasCallBaseId(CB)) continue;
-                            if (getCallBaseId(CB) == cand.id) {
+                            if (candIdSet.count(getCallBaseId(CB))) {
                                 setPartialInlineVal(CB, true);
-                                done = true;
-                                break;
                             }
                         }
-                        if (done) break;
                     }
-                    if (done) break;
                 }
             }
         }
@@ -406,10 +417,45 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
         GSnapshot.Active = false;
         std::signal(SIGINT,  PrevSIGINT);
         std::signal(SIGTERM, PrevSIGTERM);
+
+        // ── 統計摘要 ──
+        {
+            int totalFunctions = 0;
+            for (Function &F : M)
+                if (!F.isDeclaration())
+                    totalFunctions++;
+
+            std::error_code EC;
+            raw_fd_ostream DbgOS("onepasspi_stats.log", EC, sys::fs::OF_Append);
+            if (!EC) {
+                DbgOS << M.getModuleIdentifier()
+                       << ",functions=" << totalFunctions
+                       << ",candidates=" << candidates.size()
+                       << ",inlined=" << Func_inlined_id.size() << "\n";
+            }
+        }
+    }
+
+    // Validate the complete accepted set on a disposable clone before writing
+    // decisions or mutating the real module. A failure therefore rolls back by
+    // discarding the clone and aborting final materialization.
+    bool anyChange = false;
+    for (Function &F : M)
+        for (BasicBlock &BB : F)
+            for (Instruction &I : BB)
+                if (auto *CB = dyn_cast<CallBase>(&I))
+                    anyChange |= hasPartialInlineVal(CB) &&
+                                 getPartialInlineVal(CB);
+
+    if (anyChange) {
+        std::unique_ptr<Module> FinalCheck = CloneModule(M);
+        if (!materializeAndVerify(*FinalCheck, /*RunCleanup=*/true)) {
+            InsideOnePassPI = false;
+            return PreservedAnalyses::none();
+        }
     }
 
     // (f) 寫入決策檔
-    bool anyChange = false; // 標記是否真的有 partial inline 發生
     const char *EnvRecord = std::getenv("RECORD_PARTIAL_INLINE");
     std::string RecordFileName;
     if (EnvRecord && EnvRecord[0] != '\0') {
@@ -439,7 +485,6 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                     Callee->printAsOperand(RecordOS, false);
                     RecordOS << ',' << id << ','
                              << (pi ? "inlined" : "not_inlined") << '\n';
-                    if(pi) anyChange = true;
                 }
             }
         }
@@ -452,39 +497,19 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
                    << " (" << EC.message() << ")\n";
     }
 
-    // (g) final split
-    ModulePassManager MySplit;
-    FunctionPassManager MyFPM;
-    MyFPM.addPass(MyPass());
-    MySplit.addPass(createModuleToFunctionPassAdaptor(std::move(MyFPM)));
-    MySplit.run(M, MAM);
-
-    InsideOnePassPI = false;
-    // 執行function simplification
-    if(anyChange){
-        LoopAnalysisManager   LAM_cu;
-        FunctionAnalysisManager FAM_cu;
-        CGSCCAnalysisManager  CGAM_cu;
-        ModuleAnalysisManager MAM_cu;
-        PassBuilder PB_cu;
-        PB_cu.registerModuleAnalyses(MAM_cu);
-        PB_cu.registerCGSCCAnalyses(CGAM_cu);
-        PB_cu.registerFunctionAnalyses(FAM_cu);
-        PB_cu.registerLoopAnalyses(LAM_cu);
-        PB_cu.crossRegisterProxies(LAM_cu, FAM_cu, CGAM_cu, MAM_cu);
-
-        ModulePassManager CleanUpMPM;
-        CleanUpMPM.addPass(IPSCCPPass());
-        CleanUpMPM.addPass(DeadArgumentEliminationPass());
-
-        CleanUpMPM.addPass(createModuleToFunctionPassAdaptor(
-            PB_cu.buildFunctionSimplificationPipeline(
-                OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
-        CleanUpMPM.run(M, MAM_cu);
-
+    // (g) The same verified procedure is now safe to apply to the real module.
+    // Verification is repeated after materialization and after cleanup.
+    if (anyChange) {
+        bool FinalValid = materializeAndVerify(M, /*RunCleanup=*/true);
+        InsideOnePassPI = false;
+        if (!FinalValid) {
+            errs() << "Unexpected final partial-inlining verification failure "
+                      "after successful transactional preflight.\n";
+        }
         return PreservedAnalyses::none();
     }
 
+    InsideOnePassPI = false;
     return PreservedAnalyses::all(); // 沒有任何 split 發生，回傳 all() 避免不必要的 analysis 失效
 
 }
