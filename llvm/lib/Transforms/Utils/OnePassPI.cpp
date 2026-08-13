@@ -173,12 +173,14 @@ static void addSizeOptimizationPipeline(ModulePassManager &MPM,
     MPM.addPass(MergeFunctionsPass());
 }
 
-/// Helper: 為一個獨立的 Module 建立完整的 analysis manager 並跑共用的
-/// size-optimization pipeline，回傳 estimated text size。
+/// Build the standard LLVM Oz module-optimization tail and measure its text
+/// size. This is intentionally used only for the initial baseline: the
+/// experiment compares LLVM Oz against the complete proposed treatment
+/// (partial inlining plus its post-PI cleanup pipeline).
 /// buildPerModuleDefaultPipeline 會經過 buildModuleOptimizationPipeline，
 /// 其中因為 cl::opt RunMyCustomPartialInlining 為 true 會再次加入 OnePassPIPass，
 /// 但 InsideOnePassPI guard 會讓遞迴呼叫直接返回。
-static size_t ModuleOpt(Module &M) {
+static size_t measureOzBaseline(Module &M) {
     // 每個 cloned module 需要自己的一整套 analysis managers
     LoopAnalysisManager   LAM;
     FunctionAnalysisManager FAM;
@@ -192,8 +194,8 @@ static size_t ModuleOpt(Module &M) {
     PB.registerLoopAnalyses(LAM);
     PB.crossRegisterProxies(LAM, FAM, CGAM, MAM_local);
 
-    ModulePassManager MPM;
-    addSizeOptimizationPipeline(MPM, PB);
+    ModulePassManager MPM = PB.buildModuleOptimizationPipeline(
+        OptimizationLevel::Oz, ThinOrFullLTOPhase::None);
     MPM.run(M, MAM_local);
 
     return estimateTextSize(M);
@@ -277,10 +279,12 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
 
 
     {
-        // 2. baseline: clone → 共用 size-optimization pipeline → 量 size
+        // 2. Initial baseline: clone → standard LLVM Oz optimization tail
+        // → measure. Do not run the proposed post-PI cleanup pipeline here;
+        // candidates represent the complete PI+cleanup treatment versus Oz.
         // MyPass() 在沒有任何 goPartialInline=true 的 call site 時會直接 return PreservedAnalyses::all()，不做任何 CFG 改動，
         std::unique_ptr<Module> M_baseline = CloneModule(M);
-        size_t sizeBaseline = ModuleOpt(*M_baseline);
+        size_t sizeBaseline = measureOzBaseline(*M_baseline);
 
         // 3. 收集 candidate call sites，以 callee function 為單位分組。
         //    candidates 保留 callee 第一次出現在 module/BB/instruction traversal
