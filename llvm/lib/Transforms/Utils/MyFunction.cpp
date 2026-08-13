@@ -515,8 +515,11 @@ bool splitFunction(Instruction *cutI, Function &F, FunctionAnalysisManager &AM){
         return false;
     }
 
-    // 5. 設定提取出來的 function 屬性（與原本行為一致）
+    // 5. Keep the outlined suffix out of later inlining and make its
+    // downstream optimization policy explicitly size-oriented.
     newFunc->addFnAttr(Attribute::NoInline);
+    newFunc->addFnAttr(Attribute::MinSize);
+    newFunc->addFnAttr(Attribute::OptimizeForSize);
     // 移除 alwaysinline（避免跟 noinline 衝突）
     newFunc->removeFnAttr(Attribute::AlwaysInline);
 

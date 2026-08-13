@@ -3,6 +3,7 @@
 #include "llvm/Transforms/Instrumentation/FunctionID.h"
 #include "llvm/Transforms/IPO/DeadArgumentElimination.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
+#include "llvm/Transforms/IPO/GlobalOpt.h"
 #include "llvm/Transforms/IPO/MergeFunctions.h"
 #include "llvm/Transforms/IPO/SCCP.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
@@ -148,9 +149,8 @@ size_t llvm::estimateTextSize(Module &M) {
 }
 
 /// Add the common size-optimization pipeline used after partial inlining.
-/// Baseline and candidate modules must use this exact same sequence so that
-/// the measured difference is attributable to the partial-inlining decision,
-/// rather than to an asymmetric cleanup pipeline.
+/// The initial baseline intentionally uses only LLVM's standard Oz tail; every
+/// materialized partial-inlining candidate uses this complete treatment.
 static void addSizeOptimizationPipeline(ModulePassManager &MPM,
                                         PassBuilder &PB) {
     MPM.addPass(IPSCCPPass());
@@ -161,6 +161,7 @@ static void addSizeOptimizationPipeline(ModulePassManager &MPM,
     MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
 
     MPM.addPass(DeadArgumentEliminationPass());
+    MPM.addPass(GlobalOptPass());
     MPM.addPass(GlobalDCEPass());
 
     // Run the complete Oz pipeline after the targeted post-PI cleanup. The
@@ -169,8 +170,10 @@ static void addSizeOptimizationPipeline(ModulePassManager &MPM,
         OptimizationLevel::Oz, ThinOrFullLTOPhase::None));
 
     // Oz may make independently outlined functions identical. Merge them only
-    // after the complete pipeline has exposed those equivalences.
+    // after the complete pipeline has exposed those equivalences, then remove
+    // functions/aliases made dead by the merge.
     MPM.addPass(MergeFunctionsPass());
+    MPM.addPass(GlobalDCEPass());
 }
 
 /// Build the standard LLVM Oz module-optimization tail and measure its text
