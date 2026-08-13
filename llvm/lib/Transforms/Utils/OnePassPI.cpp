@@ -1,8 +1,12 @@
 #include "llvm/Transforms/Utils/OnePassPI.h"
 #include "llvm/Transforms/Utils/MyFunction.h"
 #include "llvm/Transforms/Instrumentation/FunctionID.h"
-#include "llvm/Transforms/IPO/SCCP.h"
 #include "llvm/Transforms/IPO/DeadArgumentElimination.h"
+#include "llvm/Transforms/IPO/GlobalDCE.h"
+#include "llvm/Transforms/IPO/MergeFunctions.h"
+#include "llvm/Transforms/IPO/SCCP.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Support/FileSystem.h"
 
 #include <csignal>
@@ -143,8 +147,34 @@ size_t llvm::estimateTextSize(Module &M) {
     return textSize;
 }
 
-/// Helper: 為一個獨立的 Module 建立完整的 analysis manager 並跑完整 Oz pipeline，
-/// 回傳 estimated text size。
+/// Add the common size-optimization pipeline used after partial inlining.
+/// Baseline and candidate modules must use this exact same sequence so that
+/// the measured difference is attributable to the partial-inlining decision,
+/// rather than to an asymmetric cleanup pipeline.
+static void addSizeOptimizationPipeline(ModulePassManager &MPM,
+                                        PassBuilder &PB) {
+    MPM.addPass(IPSCCPPass());
+
+    FunctionPassManager FPM;
+    FPM.addPass(SimplifyCFGPass());
+    FPM.addPass(InstCombinePass());
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+
+    MPM.addPass(DeadArgumentEliminationPass());
+    MPM.addPass(GlobalDCEPass());
+
+    // Run the complete Oz pipeline after the targeted post-PI cleanup. The
+    // InsideOnePassPI guard prevents this nested pipeline from tuning again.
+    MPM.addPass(PB.buildModuleOptimizationPipeline(
+        OptimizationLevel::Oz, ThinOrFullLTOPhase::None));
+
+    // Oz may make independently outlined functions identical. Merge them only
+    // after the complete pipeline has exposed those equivalences.
+    MPM.addPass(MergeFunctionsPass());
+}
+
+/// Helper: 為一個獨立的 Module 建立完整的 analysis manager 並跑共用的
+/// size-optimization pipeline，回傳 estimated text size。
 /// buildPerModuleDefaultPipeline 會經過 buildModuleOptimizationPipeline，
 /// 其中因為 cl::opt RunMyCustomPartialInlining 為 true 會再次加入 OnePassPIPass，
 /// 但 InsideOnePassPI guard 會讓遞迴呼叫直接返回。
@@ -162,9 +192,8 @@ static size_t ModuleOpt(Module &M) {
     PB.registerLoopAnalyses(LAM);
     PB.crossRegisterProxies(LAM, FAM, CGAM, MAM_local);
 
-    // 跑完剩下的 Oz pipeline
-    ModulePassManager MPM =
-        PB.buildModuleOptimizationPipeline(OptimizationLevel::Oz, ThinOrFullLTOPhase::None);
+    ModulePassManager MPM;
+    addSizeOptimizationPipeline(MPM, PB);
     MPM.run(M, MAM_local);
 
     return estimateTextSize(M);
@@ -204,11 +233,7 @@ static bool materializeAndVerify(Module &M, bool RunCleanup) {
 
     if (RunCleanup) {
         ModulePassManager CleanupMPM;
-        CleanupMPM.addPass(IPSCCPPass());
-        CleanupMPM.addPass(DeadArgumentEliminationPass());
-        CleanupMPM.addPass(createModuleToFunctionPassAdaptor(
-            PB.buildFunctionSimplificationPipeline(
-                OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
+        addSizeOptimizationPipeline(CleanupMPM, PB);
         CleanupMPM.run(M, MAM);
 
         if (verifyModule(M, &errs())) {
@@ -252,7 +277,7 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
 
 
     {
-        // 2. baseline: clone → 完整 Oz → 量 size
+        // 2. baseline: clone → 共用 size-optimization pipeline → 量 size
         // MyPass() 在沒有任何 goPartialInline=true 的 call site 時會直接 return PreservedAnalyses::all()，不做任何 CFG 改動，
         std::unique_ptr<Module> M_baseline = CloneModule(M);
         size_t sizeBaseline = ModuleOpt(*M_baseline);
@@ -331,41 +356,8 @@ PreservedAnalyses OnePassPIPass::run(Module &M, ModuleAnalysisManager &MAM){
             // (c) Transactionally materialize all accepted decisions plus the
             // current candidate on the clone. A verifier failure rejects this
             // candidate before optimization or size comparison.
-            if (!materializeAndVerify(*M_comp, /*RunCleanup=*/false))
+            if (!materializeAndVerify(*M_comp, /*RunCleanup=*/true))
                 continue;
-
-            // Run the remaining optimization pipeline on the verified clone.
-            {
-                LoopAnalysisManager   LAM_c;
-                FunctionAnalysisManager FAM_c;
-                CGSCCAnalysisManager  CGAM_c;
-                ModuleAnalysisManager MAM_c;
-
-                PassBuilder PB_c;
-                PB_c.registerModuleAnalyses(MAM_c);
-                PB_c.registerCGSCCAnalyses(CGAM_c);
-                PB_c.registerFunctionAnalyses(FAM_c);
-                PB_c.registerLoopAnalyses(LAM_c);
-                PB_c.crossRegisterProxies(LAM_c, FAM_c, CGAM_c, MAM_c);
-
-                // Simplification → Optimization
-                ModulePassManager MPM_c;
-                MPM_c.addPass(IPSCCPPass());
-                MPM_c.addPass(DeadArgumentEliminationPass());
-
-                MPM_c.addPass(createModuleToFunctionPassAdaptor(
-                    PB_c.buildFunctionSimplificationPipeline(
-                        OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
-                // InsideOnePassPI guard 會阻止遞迴
-                MPM_c.addPass(std::move(
-                    PB_c.buildModuleOptimizationPipeline(
-                        OptimizationLevel::Oz, ThinOrFullLTOPhase::None)));
-                MPM_c.run(*M_comp, MAM_c);
-            }
-
-            if (verifyModule(*M_comp, &errs())) {
-                continue;
-            }
 
             // (d) 量 size，跟 baseline 比較
             size_t sizeComp = estimateTextSize(*M_comp);

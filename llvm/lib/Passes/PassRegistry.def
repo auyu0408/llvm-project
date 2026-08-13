@@ -502,7 +502,6 @@ FUNCTION_PASS("view-post-dom-only", PostDomOnlyViewer())
 FUNCTION_PASS("wasm-eh-prepare", WasmEHPreparePass())
 
 FUNCTION_PASS("my-pass", MyPass())
-FUNCTION_PASS("my-pass2", MyPass2())
 #undef FUNCTION_PASS
 
 #ifndef FUNCTION_PASS_WITH_PARAMS

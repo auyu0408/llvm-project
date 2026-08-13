@@ -34,7 +34,6 @@ add_llvm_component_library(LLVMTransformUtils
 
   MyFunction.cpp
   MyPass.cpp
-  MyPass2.cpp
   NewMod.cpp
   ReadIn.cpp
   OnePassPI.cpp
