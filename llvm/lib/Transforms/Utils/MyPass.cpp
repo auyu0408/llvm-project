@@ -97,10 +97,38 @@ PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM){
 
         bool res = splitFunction(CutI, F, AM);
         if(res){
+            // The experiment must be able to evaluate the selected custom
+            // partial-inlining decision even when Clang was invoked with
+            // -fno-inline (or the original function was otherwise marked
+            // noinline). Temporarily override both the callee and call-site
+            // barriers only for these explicitly selected calls. The outlined
+            // cold function remains noinline as established by splitFunction.
+            bool RestoreCalleeNoInline =
+                F.hasFnAttribute(Attribute::NoInline);
+            if (RestoreCalleeNoInline)
+                F.removeFnAttr(Attribute::NoInline);
+
             for(auto *CI : InlineCalls){
+                bool RestoreCallNoInline =
+                    CI->hasFnAttr(Attribute::NoInline);
+                if (RestoreCallNoInline)
+                    CI->removeFnAttr(Attribute::NoInline);
+
                 InlineFunctionInfo IFI;
-                InlineFunction(*CI, IFI);
+                InlineResult Result = InlineFunction(*CI, IFI);
+                if (!Result.isSuccess()) {
+                    // A failed InlineFunction leaves the call well-defined, so
+                    // restore its original policy before rejecting/diagnosing
+                    // the transformation at the enclosing module transaction.
+                    if (RestoreCallNoInline)
+                        CI->addFnAttr(Attribute::NoInline);
+                    errs() << "Custom partial inline failed at call site: "
+                           << Result.getFailureReason() << "\n";
+                }
             }
+
+            if (RestoreCalleeNoInline)
+                F.addFnAttr(Attribute::NoInline);
             F.addFnAttr("MyPass"); // 避免被再次 inline
         }
     }
